@@ -45,26 +45,19 @@ export interface FileWalkerProgress {
  */
 const SKIP_DIRECTORIES = new Set([
   'node_modules',
-  '.git',
-  '.svn',
-  '.hg',
   'dist',
   'build',
   'out',
   'target',
   'bin',
   'obj',
-  '.cache',
-  '.tmp',
-  '.temp',
   '__pycache__',
-  '.pytest_cache',
   'coverage',
-  '.nyc_output',
-  '.coverage',
-  '.idea',
-  '.vscode',
-  '.vs',
+  'vendor',
+  'storybook-static',
+  'cdk.out',
+  'android',
+  'ios',
   OPENSPEC_DIR,
   OPENLORE_DIR,
 ]);
@@ -73,7 +66,6 @@ const SKIP_DIRECTORIES = new Set([
  * Directories to skip only when not at root level
  */
 const SKIP_DIRECTORIES_NOT_ROOT = new Set([
-  'vendor',
   'deps',
   'packages',
 ]);
@@ -398,6 +390,11 @@ export class FileWalker {
   private shouldSkipDirectory(dirName: string, depth: number, relativeDir?: string): boolean {
     // Always skip these directories
     if (SKIP_DIRECTORIES.has(dirName)) {
+      return true;
+    }
+
+    // Skip all hidden directories (dot-prefixed) — never contain analyzable source code
+    if (dirName.startsWith('.')) {
       return true;
     }
 
