@@ -187,25 +187,35 @@ describe('openlore preflight', () => {
     expect(human).toContain('Staleness:');
   });
 
-  it('AC#3: --fix updates graph fingerprint and re-check passes', async () => {
-    // Simulate "analyze fixed it" by directly bumping fingerprint.json + mtimes
-    // in a wrapper. We bypass the real analyzer (it requires the full pipeline);
-    // the contract under test is "preflight re-runs after fix and reports FRESH."
+  it('AC#3: --fix invokes analyzer, then re-check reports FRESH', async () => {
     const after = (GRAPH_MS + 60_000) / 1000;
     await writeFile(join(dir, 'src/foo.ts'), 'changed\n');
     await utimes(join(dir, 'src/foo.ts'), after, after);
 
-    // First confirm we're STALE.
-    let res = await runPreflight({ cwd: dir, json: true });
-    expect(res.code).toBe(1);
+    let analyzerCalls = 0;
+    const fakeAnalyze = async (cwd: string): Promise<number> => {
+      analyzerCalls++;
+      expect(cwd).toBe(dir);
+      // Real `analyze` rewrites fingerprint.json with a current timestamp;
+      // simulate that side-effect only.
+      await makeFingerprint(cwd, new Date().toISOString());
+      return 0;
+    };
 
-    // Bump the fingerprint to "now" — the equivalent of what `analyze` does.
-    const nowIso = new Date().toISOString();
-    await makeFingerprint(dir, nowIso);
-
-    res = await runPreflight({ cwd: dir, json: true });
+    const res = await runPreflight({ cwd: dir, json: true, fix: true, analyzeFn: fakeAnalyze });
+    expect(analyzerCalls).toBe(1);
     expect(res.code).toBe(0);
     expect(res.summary?.status).toBe('FRESH');
+  });
+
+  it('--fix exits 2 when the analyzer itself fails', async () => {
+    const after = (GRAPH_MS + 60_000) / 1000;
+    await writeFile(join(dir, 'src/foo.ts'), 'changed\n');
+    await utimes(join(dir, 'src/foo.ts'), after, after);
+
+    const failingAnalyze = async (): Promise<number> => 1;
+    const res = await runPreflight({ cwd: dir, json: true, fix: true, analyzeFn: failingAnalyze });
+    expect(res.code).toBe(2);
   });
 
   it('--max-staleness raises the threshold and lets a small change through', async () => {

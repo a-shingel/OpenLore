@@ -271,6 +271,7 @@ The graph and the OpenSpec spec layer are co-equal: the graph makes orientation 
 | Drift detection in depth | [docs/drift-detection.md](docs/drift-detection.md) |
 | Spec-driven tests + spec digest | [docs/spec-tests.md](docs/spec-tests.md) |
 | CI/CD integration | [docs/ci-cd.md](docs/ci-cd.md) |
+| Preflight CI staleness gate | [docs/preflight.md](docs/preflight.md) |
 | CLI command reference | [docs/cli-reference.md](docs/cli-reference.md) |
 | Interactive graph viewer | [docs/viewer.md](docs/viewer.md) |
 | Analysis output files | [docs/output.md](docs/output.md) |

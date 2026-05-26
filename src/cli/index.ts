@@ -92,6 +92,7 @@ Workflow:
   9. openlore drift                   Detect when code outpaces specs
   10. openlore test                    Generate spec-driven tests or check coverage
   11. openlore digest                  Plain-English summary of specs for human review
+  12. openlore preflight               CI staleness gate: fail PRs when the graph is out of date
 
 Quick start:
   $ cd your-project

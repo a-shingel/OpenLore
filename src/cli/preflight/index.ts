@@ -34,6 +34,13 @@ export interface PreflightOptions {
   json?: boolean;
   since?: string;
   maxStaleness?: number;
+  /**
+   * Test-only seam: replace the analyzer invocation used by --fix. Returns
+   * the exit code (0 = success). Production code spawns `openlore analyze`;
+   * tests pass a stub that simulates the side-effect (refreshing
+   * fingerprint.json) without needing the full pipeline.
+   */
+  analyzeFn?: (cwd: string) => Promise<number>;
 }
 
 const DEFAULT_THRESHOLD = 0;
@@ -103,7 +110,7 @@ export async function runPreflight(opts: PreflightOptions): Promise<{
   // 6. --fix path runs `openlore analyze` then re-checks.
   if (stale && opts.fix) {
     if (!opts.json) logger.discovery('Stale graph detected — running `openlore analyze --fix`');
-    const code = await runAnalyzeFix(cwd);
+    const code = await (opts.analyzeFn ?? runAnalyzeFix)(cwd);
     if (code !== 0) {
       if (opts.json) {
         process.stdout.write(
@@ -121,6 +128,7 @@ export async function runPreflight(opts: PreflightOptions): Promise<{
       cwd,
       json: opts.json,
       maxStaleness: opts.maxStaleness,
+      analyzeFn: opts.analyzeFn,
     });
   }
 
