@@ -169,8 +169,12 @@ export class McpWatcher {
         // callerFiles are relative paths (DB stores relative paths)
         const callerFiles = store.getCallerFiles(rel);
 
-        // Re-parse BEFORE mutating DB — graph stays readable (old state) during parse
-        const { edges: newEdges, nodes: newNodes } = await buildGraphSubset(rel, content, callerFiles, this.rootPath);
+        // Re-parse BEFORE mutating DB — graph stays readable (old state) during parse.
+        // Seed resolution with all known nodes so the re-parsed caller files'
+        // calls into other files don't degrade to `external::` (they would
+        // otherwise, since the subset trie only holds the re-parsed files).
+        const resolutionNodes = store.getAllInternalNodes();
+        const { edges: newEdges, nodes: newNodes } = await buildGraphSubset(rel, content, callerFiles, this.rootPath, resolutionNodes);
 
         // Atomic swap: delete stale data and insert fresh data in one transaction
         // so concurrent MCP reads never see a torn graph
@@ -232,24 +236,22 @@ export class McpWatcher {
 
       if (!VectorIndex.exists(this.outputPath)) return;
 
-      let embedSvc;
+      let embedSvc: InstanceType<typeof EmbeddingService> | null;
       try {
         embedSvc = EmbeddingService.fromEnv();
       } catch {
         const cfg = await readOpenLoreConfig(this.rootPath);
         embedSvc = cfg ? EmbeddingService.fromConfig(cfg) : null;
       }
-      if (!embedSvc) {
-        process.stderr.write('[mcp-watcher] no embedding service — skipping re-embed\n');
-        return;
-      }
+      // embedSvc may be null: VectorIndex.build then refreshes the BM25-only
+      // corpus rather than re-embedding. Keeps the keyword index live in watch mode.
 
       const cg = context.callGraph!;
       const hubIds    = new Set((cg.hubFunctions ?? []).map(f => f.id));
       const entryIds  = new Set((cg.entryPoints ?? []).map(f => f.id));
       const fileContents = new Map([[rel, content]]);
 
-      const { embedded, reused } = await VectorIndex.build(
+      const { embedded, reused, total, hasEmbeddings } = await VectorIndex.build(
         this.outputPath,
         cg.nodes,
         context.signatures ?? [],
@@ -261,7 +263,9 @@ export class McpWatcher {
       );
 
       process.stderr.write(
-        `[mcp-watcher] re-embedded ${rel}: ${embedded} new, ${reused} reused\n`
+        hasEmbeddings
+          ? `[mcp-watcher] re-embedded ${rel}: ${embedded} new, ${reused} reused\n`
+          : `[mcp-watcher] refreshed BM25 index for ${rel}: ${total} functions\n`
       );
     } catch (err) {
       process.stderr.write(`[mcp-watcher] embed error: ${(err as Error).message}\n`);
@@ -289,6 +293,7 @@ async function buildGraphSubset(
   changedContent: string,
   callerFiles: string[],
   rootDir: string,
+  resolutionNodes?: import('../analyzer/call-graph.js').FunctionNode[],
 ): Promise<{
   edges: import('../analyzer/call-graph.js').CallEdge[];
   nodes: import('../analyzer/call-graph.js').FunctionNode[];
@@ -314,7 +319,7 @@ async function buildGraphSubset(
   }
 
   const builder = new CallGraphBuilder();
-  const result = await builder.build(files);
+  const result = await builder.build(files, undefined, undefined, resolutionNodes);
 
   // Only return nodes from changedFile — callerFiles nodes are already in DB and unchanged
   const changedNodes = Array.from(result.nodes.values()).filter(n => n.filePath === changedRel);

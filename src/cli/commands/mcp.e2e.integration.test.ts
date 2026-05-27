@@ -19,6 +19,11 @@
  *   npm run test:integration  # run this file
  *
  * The suite auto-skips when the analysis cache is missing.
+ *
+ * Note: this suite is excluded from the CI Unit Tests job, which is how the
+ * "embeddings required" regression (spec-06) originally shipped. The BM25
+ * search path is now also guarded by a plain unit test that DOES run in CI —
+ * see mcp-handlers/bm25-no-embeddings.test.ts.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -747,7 +752,7 @@ describe('RIG-19 — MCP e2e integration on real openlore codebase', () => {
       symbol:    'validateDirectory',
       depth:     2,
     });
-    const data = client.parseToolResult(resp) as {
+    type ImpactResult = {
       symbol:      string;
       file:        string;
       language:    string;
@@ -759,6 +764,14 @@ describe('RIG-19 — MCP e2e integration on real openlore codebase', () => {
       downstreamCriticalPath: Array<{ name: string; depth: number }>;
       recommendedStrategy:    { approach: string; rationale: string };
     };
+    // handleAnalyzeImpact resolves the symbol via FTS, which can match more than
+    // one node for a common name. It returns the single result flat, or
+    // `{ matches: [...] }` for several — pick the exact-name match either way.
+    const raw = client.parseToolResult(resp) as ImpactResult | { matches: ImpactResult[] };
+    const data: ImpactResult =
+      'matches' in raw
+        ? (raw.matches.find(m => m.symbol === 'validateDirectory') ?? raw.matches[0])
+        : raw;
 
     expect(data.symbol).toBe('validateDirectory');
     expect(typeof data.file).toBe('string');
@@ -766,8 +779,10 @@ describe('RIG-19 — MCP e2e integration on real openlore codebase', () => {
     expect(typeof data.metrics.fanIn).toBe('number');
     expect(typeof data.metrics.fanOut).toBe('number');
 
-    // validateDirectory has many callers → upstream chain must be non-empty
-    expect(data.blastRadius.upstream).toBeGreaterThan(5);
+    // validateDirectory is a hub with callers → upstream chain must be non-empty.
+    // (Symbol resolution now prefers the exact match, so this is validateDirectory's
+    // own blast radius, not an inflated union with validateDirectoryImpl/Depth.)
+    expect(data.blastRadius.upstream).toBeGreaterThan(0);
     expect(data.blastRadius.total).toBeGreaterThan(0);
 
     expect(['low', 'medium', 'high', 'critical']).toContain(data.riskLevel);
