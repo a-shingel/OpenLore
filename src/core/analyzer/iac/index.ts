@@ -13,6 +13,7 @@ import { extractHelm } from './helm.js';
 import { extractCloudFormation } from './cloudformation.js';
 import { extractAnsible } from './ansible.js';
 import { extractPulumi } from './pulumi.js';
+import { extractCdk } from './cdk.js';
 import { projectIacGraph, type ProjectedIac } from './project.js';
 import { mergeIacGraphs, type IacGraph } from './types.js';
 
@@ -25,14 +26,18 @@ interface InFile { path: string; content: string; language: string }
 /** Build the normalized IaC graph from a mixed file set (no projection). */
 export function buildIacGraph(files: InFile[]): IacGraph {
   const byLang = (lang: string) => files.filter((f) => f.language === lang);
+  const generalPurpose = files.filter(
+    (f) => f.language === 'TypeScript' || f.language === 'JavaScript' || f.language === 'Python' || f.language === 'Go',
+  );
   const graphs: IacGraph[] = [
     extractTerraform(byLang('Terraform')),
     extractKubernetes(byLang('Kubernetes')),
     extractHelm(byLang('Helm')),
     extractCloudFormation(byLang('CloudFormation')),
     extractAnsible(byLang('Ansible')),
-    // Pulumi rides on existing general-purpose languages, not an IaC tag.
-    extractPulumi(files.filter((f) => f.language === 'TypeScript' || f.language === 'JavaScript' || f.language === 'Python' || f.language === 'Go')),
+    // Pulumi, CDK, and CDKTF ride on existing general-purpose languages, not an IaC tag.
+    extractPulumi(generalPurpose),
+    extractCdk(generalPurpose),
   ];
   return mergeIacGraphs(graphs);
 }

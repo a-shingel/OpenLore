@@ -193,7 +193,7 @@ describe('scipLanguageName', () => {
   });
 
   it('maps IaC (spec-07) tags to UnspecifiedLanguage (empty string)', () => {
-    for (const lang of ['Terraform', 'Kubernetes', 'Helm', 'CloudFormation', 'Ansible', 'Pulumi']) {
+    for (const lang of ['Terraform', 'Kubernetes', 'Helm', 'CloudFormation', 'Ansible', 'Pulumi', 'CDK', 'CDKTF']) {
       expect(scipLanguageName(lang)).toBe('');
     }
   });

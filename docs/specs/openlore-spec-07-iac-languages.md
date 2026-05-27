@@ -270,6 +270,13 @@ Co-located tests under `src/core/analyzer/iac/*.test.ts` with fixtures under
 - **Pulumi:** Go programs (`github.com/pulumi/pulumi-*`, `pkg.NewService(ctx, "name", …)`)
   are now detected alongside TS/JS/Python.
 
-**Intentionally deferred (not gaps):** CDK / CDKTF remain out of scope per the
-spec's scope contract; truly dynamic (fully templated) references are dropped by
-design rather than guessed.
+- **CDK / CDKTF:** added (beyond the original spec's deferral, at the maintainer's
+  request). Framework detectors over TS/JS/Python/Go recognizing construct
+  instantiations where the scope is the first arg and the logical id the second
+  (`new s3.Bucket(this, "id", …)`); Go `jsii.String("id")` ids are unwrapped.
+  New `CDK` and `CDKTF` language tags were added (SCIP → `UnspecifiedLanguage`,
+  manifest `languages[]` picks them up automatically).
+
+**Intentionally deferred (not gaps):** truly dynamic (fully templated)
+references are dropped by design rather than guessed. Bicep, ARM JSON,
+Kustomize, Crossplane, etc. remain future specs.

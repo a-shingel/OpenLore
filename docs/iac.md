@@ -63,7 +63,14 @@ Helm, executes Ansible, or calls a cloud API. No external CLI is required.
 - A **framework detector** over existing source — no new grammar. Recognizes provider SDK resource constructions (`@pulumi/aws`, `/gcp`, `/azure-native`, `/kubernetes`; Go: `github.com/pulumi/pulumi-*`).
 - **Nodes:** each detected resource (`address = <Service>:<name>`, `language = Pulumi`).
 - **Edges:** when one resource's args reference another resource's variable.
-- The normal call graph for those files is unchanged. CDK / CDKTF are out of scope (a future spec).
+- The normal call graph for those files is unchanged.
+
+### AWS CDK & CDKTF  (TS/JS/Python/Go programs)
+- Framework detectors like Pulumi. The distinguishing shape is that a construct's **first** argument is the scope and the **second** is the logical id: `new s3.Bucket(this, "MyBucket", { … })` (CDK), `new S3Bucket(scope, "logs", { … })` (CDKTF).
+- **Imports:** CDK = `aws-cdk-lib` / `@aws-cdk/*` / `aws_cdk` (Python) / `aws/aws-cdk-go` (Go); CDKTF = `cdktf` / `@cdktf/*` / `terraform-cdk-go` (Go). Go ids wrapped in `jsii.String("…")` are unwrapped.
+- **Nodes:** each construct (`address = <Service>:<id>`, `language = CDK` or `CDKTF`).
+- **Edges:** when one construct's args reference another construct's variable.
+- Static detection only — OpenLore never runs `cdk synth` / `cdktf synth`.
 
 ## Discovery & disambiguation
 
@@ -85,5 +92,5 @@ are ambiguous, so they route through a small pure function,
 
 ## Out of scope (future specs)
 
-Bicep, ARM JSON, Kustomize, Crossplane, CDK / CDKTF, Dockerfile,
-docker-compose, Jsonnet/CUE, Nix, Bazel/Starlark, Packer, Vagrant.
+Bicep, ARM JSON, Kustomize, Crossplane, Dockerfile, docker-compose,
+Jsonnet/CUE, Nix, Bazel/Starlark, Packer, Vagrant.

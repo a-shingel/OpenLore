@@ -17,7 +17,9 @@ export type IacLanguage =
   | 'Helm'
   | 'CloudFormation'
   | 'Ansible'
-  | 'Pulumi';
+  | 'Pulumi'
+  | 'CDK'
+  | 'CDKTF';
 
 /** All IaC language tags (single source of truth for dispatch + gating). */
 export const IAC_LANGUAGES: readonly IacLanguage[] = [
@@ -27,6 +29,8 @@ export const IAC_LANGUAGES: readonly IacLanguage[] = [
   'CloudFormation',
   'Ansible',
   'Pulumi',
+  'CDK',
+  'CDKTF',
 ] as const;
 
 export function isIacLanguage(lang: string): lang is IacLanguage {
