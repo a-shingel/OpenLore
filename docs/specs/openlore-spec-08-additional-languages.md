@@ -183,3 +183,69 @@ Ship the nine above in this one PR. Explicitly deferred to future specs — do *
 ## When you are done
 
 Reply with: PR URL, summary, follow-ups, files changed. Nothing else.
+
+---
+
+## Implementation log (2026-05-27)
+
+Status: **complete** — all nine languages shipped on branch
+`openlore-spec-08-additional-languages`, one PR.
+
+### Architectural decisions
+
+1. **Followed the existing tree-sitter extractor pattern exactly.** Each new
+   language is wired in four places (lazy soft loader, FN/CALL queries, dispatch
+   branch, detection). No change to `FunctionNode`/`CallEdge`/`ClassNode`, the
+   MCP tools, `orient`, the search index, SCIP export, or the federation
+   manifest. Existing extractors were not touched.
+2. **Shared query-driven extractor (`extractByQueries`).** The structurally
+   similar languages (C#, Kotlin, PHP, C, Scala, Dart, Lua, Bash) run through one
+   generic extractor parameterized by a `QueryLangSpec` (queries + grouping node
+   types + optional hooks). Elixir gets a bespoke walk because its grammar models
+   everything as `call` nodes.
+3. **Name-based call resolution.** New languages capture the callee *name* only
+   (not the receiver object) and resolve via the existing name-based trie — the
+   self/cls/type-inference strategies aren't wired for these languages, so
+   capturing the object only forced calls external. This matches the repo's
+   "best-effort, name-based" edge policy and resolves `this.M()`/`Class.M()`/
+   `$this->m()`/`Obj.m()` cleanly.
+4. **Graceful degradation is mandatory and load-bearing here.** Grammars are
+   native modules; `loadGrammarSoft` caches per language, warns once, and returns
+   null on failure so `analyze` never crashes and other languages are unaffected.
+
+### Phantom-language fix
+
+C#, Kotlin, PHP, and C were detected by `detectLanguage` but had no dispatch
+branch → counted-but-empty graphs. They now produce real nodes and edges. The
+`.h` ambiguity is resolved by `resolveHeaderLanguage` (tested): C-only project →
+C; any C++ source present → C++; standalone → C++.
+
+### Grammar / environment notes (native ABI)
+
+Host `tree-sitter` is pinned at 0.22.4 (ABI 14); node 25 cannot compile
+`tree-sitter` 0.25 from source in this environment. Grammar versions were pinned
+to ABI-14 prebuilds where needed: `tree-sitter-c-sharp@0.23.1`,
+`tree-sitter-php@0.23.12`, `tree-sitter-c@0.23.6`, `tree-sitter-bash@0.23.3`;
+Kotlin/Scala/Elixir load at their latest. **Lua and Dart ship only ABI-15
+builds**, so in this environment they exercise the graceful-degradation path
+(implemented + tested) and graph wherever an ABI-15 host binding is available.
+Seven languages extract fully here; all nine are wired end to end.
+
+### Verified
+
+All ten acceptance criteria addressed: phantom fix, new-language graphs,
+class grouping, language-specific edges, `.h` disambiguation, cross-cutting
+tools unchanged (polyglot integration test), graceful degradation (simulated
+unavailable grammar), determinism (build-twice deep-equal), no regression (full
+suite green, existing extractors untouched), and `lint`/`typecheck`/`test:run`/
+`build` all pass.
+
+### Follow-ups (`TODO(spec-08-followup)`)
+
+- Lua/Dart: pick up real extraction once an ABI-15 host `tree-sitter` is
+  buildable on the CI node version (code + fixtures already in place).
+- Bash `source`/`.` as file-level dependency edges.
+- Stage-1 regex signatures per new language (call-graph already feeds search).
+- Deferred languages (Objective-C, Perl, Haskell, Clojure, F#, Groovy, OCaml,
+  Zig, Nim, Julia, Erlang, VB.NET, PowerShell, Fortran, COBOL) remain future
+  specs; SQL/R/MATLAB/HTML need a different (non-call-graph) model.
