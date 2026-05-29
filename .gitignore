@@ -14,7 +14,8 @@ Thumbs.db
 *.swo
 *~
 #*#
-.claude
+.claude/*
+!.claude/commands
 .openlore/
 .mcp.json
 .cursor/
