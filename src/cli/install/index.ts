@@ -66,32 +66,35 @@ export interface InstallOptions {
  * Build the openlore index so the freshly-wired orient() returns results on the
  * user's first session instead of "No analysis found".
  *
- * Drives the real `init` and `analyze` CLI commands (not the programmatic API):
- * the searchable BM25 index that orient depends on is built by analyze's embed
- * step, which only the CLI command runs. Both commands read process.cwd(), so
- * we chdir into the target for the duration. Failures are non-fatal — the
- * surfaces are already wired, so we warn and tell the user to run analyze
- * themselves rather than failing the whole install.
+ * - init: use the programmatic API (openloreInit), which is silent and returns
+ *   created:false when config already exists. The init CLI command instead logs
+ *   a scary "[error] Configuration exists. Use --force" on re-runs, which is
+ *   misleading inside install where re-running is a clean no-op.
+ * - analyze: drive the real CLI command — the searchable BM25 index orient reads
+ *   is built by analyze's embed step, which only the CLI command runs. It reads
+ *   process.cwd(), so we chdir into the target for the duration.
+ *
+ * Failures are non-fatal: the surfaces are already wired, so we warn and tell
+ * the user to run analyze themselves rather than failing the whole install.
  */
 async function buildIndex(cwd: string): Promise<void> {
   const prevCwd = process.cwd();
-  // init/analyze print their own multi-line CLI output ("Next step: run
-  // generate", etc.) via console.log — noise inside install. Capture it to
-  // stderr so install shows its own concise summary; logger.error still surfaces.
+  // analyze prints its own multi-line CLI output ("Next step: run generate",
+  // etc.) via console.log — noise inside install. Capture it to stderr so
+  // install shows its own concise summary; logger.error still surfaces.
   const origLog = console.log;
   const toStderr = (...args: unknown[]): void => {
     process.stderr.write(args.map(a => (typeof a === 'string' ? a : String(a))).join(' ') + '\n');
   };
   try {
-    process.chdir(cwd);
-    const { initCommand } = await import('../commands/init.js');
-    const { analyzeCommand } = await import('../commands/analyze.js');
+    const { openloreInit } = await import('../../api/init.js');
+    // Silent + idempotent: creates config if absent, no-ops (created:false) if present.
+    await openloreInit({ rootPath: cwd });
 
+    process.chdir(cwd);
+    const { analyzeCommand } = await import('../commands/analyze.js');
     logger.discovery('Building search index (BM25; no network required)…');
     console.log = toStderr;
-    // init is idempotent (skips if config already exists); analyze builds the
-    // BM25 index orient() reads — no embedding endpoint needed.
-    await initCommand.parseAsync([], { from: 'user' });
     await analyzeCommand.parseAsync([], { from: 'user' });
     console.log = origLog;
     logger.success('Index built — orient() will return results in your next session.');
