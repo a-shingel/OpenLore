@@ -54,13 +54,26 @@ export interface BenchTask {
   };
 }
 
-// ── Pinned repos (SHAs resolved 2026-06-01 via `git ls-remote <url> refs/tags/<tag>`) ──
+// ── Pinned repos (SHAs resolved via `git ls-remote <url> refs/tags/<tag>`) ──
+//
+// Two tiers, deliberately. The SMALL/popular repos (resolved 2026-06-01) are the
+// arena where openlore was shown to add overhead — kept as the honest contrast.
+// The LARGE repos (resolved 2026-06-01) mirror CodeGraph's published benchmark
+// set so our deep-trace results are directly comparable; they are the arena where
+// a pre-indexed graph should beat blind grep+read (orientation genuinely explodes
+// to dozens of file reads).
 export const REPOS: PinnedRepo[] = [
+  // small / popular (model already knows them — openlore's worst case)
   { id: 'chalk',   url: 'https://github.com/chalk/chalk',         tag: 'v5.3.0',  sha: '85e35510fdb85c028be09848ba80d863129ee054', language: 'TypeScript' },
   { id: 'express', url: 'https://github.com/expressjs/express',   tag: '4.19.2',  sha: 'd36495d7e666f30c06fbb0e039771c5267d7d1d4', language: 'JavaScript' },
   { id: 'flask',   url: 'https://github.com/pallets/flask',       tag: '3.0.3',   sha: '85039283fc3e986cced4ab39a3fe2b39314d06bb', language: 'Python' },
   { id: 'gin',     url: 'https://github.com/gin-gonic/gin',       tag: 'v1.10.0', sha: '75ccf94d605a05fe24817fc2f166f6f2959d5cea', language: 'Go' },
   { id: 'zod',     url: 'https://github.com/colinhacks/zod',      tag: 'v3.23.8', sha: 'ca42965df46b2f7e2747db29c40a26bcb32a51d5', language: 'TypeScript' },
+  // large (mirror CodeGraph's set — the arena where a graph should pay off)
+  { id: 'django',     url: 'https://github.com/django/django',         tag: '5.0.6',                  sha: 'c990212568961233fbd11db8009f72a5cd79ff46', language: 'Python' },
+  { id: 'tokio',      url: 'https://github.com/tokio-rs/tokio',         tag: 'tokio-1.38.0',           sha: '14c17fc09656a30230177b600bacceb9db33e942', language: 'Rust' },
+  { id: 'excalidraw', url: 'https://github.com/excalidraw/excalidraw',  tag: 'v0.17.6',                sha: 'f1640710aae577cafb3c52ab2bf255a460c3ebf1', language: 'TypeScript' },
+  { id: 'okhttp',     url: 'https://github.com/square/okhttp',          tag: 'parent-5.0.0-alpha.14',  sha: '374def39eb276bf0ad724dc71c589241851f5b16', language: 'Java' },
 ];
 
 /**
@@ -136,6 +149,56 @@ export const TASKS: BenchTask[] = [
     expect: {
       mustInclude: ['src/types.ts'],
       rationale: 'ZodString and its _parse live in src/types.ts in zod v3.',
+    },
+  },
+
+  // ── LARGE-repo deep traces — CodeGraph's exact questions, the arena where a
+  //    pre-indexed graph should beat blind grep+read. Multi-hop "how does X flow
+  //    through Y" questions; the expected answer must name the central type/file
+  //    any correct trace has to reach (grep-verifiable, not openlore-derived). ──
+  {
+    id: 'django-orm-query-execution',
+    repo: 'django', kind: 'call-path',
+    prompt: "How does Django's ORM build and execute a SQL query from a QuerySet? Trace the path and name the key classes and files involved.",
+    expect: {
+      mustInclude: ['SQLCompiler', 'sql/compiler.py'],
+      rationale: 'QuerySet → Query → SQLCompiler.execute_sql / as_sql in django/db/models/sql/compiler.py is the core of query execution.',
+    },
+  },
+  {
+    id: 'tokio-task-scheduling',
+    repo: 'tokio', kind: 'call-path',
+    prompt: 'How does tokio schedule and run async tasks on its multi-threaded runtime? Trace the path and name the key modules and types.',
+    expect: {
+      mustInclude: ['scheduler', 'runtime'],
+      rationale: 'Tasks are driven by the runtime scheduler in tokio/src/runtime/scheduler/* (multi_thread worker loop).',
+    },
+  },
+  {
+    id: 'excalidraw-canvas-render',
+    repo: 'excalidraw', kind: 'call-path',
+    prompt: 'How does Excalidraw render and update canvas elements? Trace the render path and name the key functions and files.',
+    expect: {
+      mustInclude: ['renderScene'],
+      rationale: 'The scene render entry point renderScene (renderer/) drives element drawing.',
+    },
+  },
+  {
+    id: 'okhttp-interceptor-chain',
+    repo: 'okhttp', kind: 'call-path',
+    prompt: 'How does OkHttp process a request through its interceptor chain? Trace the path and name the key classes.',
+    expect: {
+      mustInclude: ['RealInterceptorChain', 'Interceptor'],
+      rationale: 'RealInterceptorChain.proceed drives the interceptor pipeline.',
+    },
+  },
+  {
+    id: 'gin-middleware-chain',
+    repo: 'gin', kind: 'call-path',
+    prompt: 'How does gin route a request and run it through its middleware chain? Trace the path and name the key types and functions.',
+    expect: {
+      mustInclude: ['HandlersChain', 'Next'],
+      rationale: 'Engine.handleHTTPRequest → Context.Next() walks the HandlersChain (middleware) in gin.',
     },
   },
 ];

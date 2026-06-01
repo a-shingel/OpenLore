@@ -34,6 +34,7 @@ interface Opts {
   out: string;
   maxBudgetUsd: number;
   skipSetup: boolean;
+  withFullTools: boolean;   // WITH exposes all ~45 tools instead of --minimal's 5
 }
 
 function parseArgs(argv: string[]): Opts {
@@ -56,6 +57,7 @@ function parseArgs(argv: string[]): Opts {
     out: get('--out') ?? join(process.cwd(), 'docs', 'AGENT-BENCHMARKS.md'),
     maxBudgetUsd: parseFloat(get('--max-budget-usd') ?? '2'),
     skipSetup: argv.includes('--skip-setup'),
+    withFullTools: argv.includes('--with-full-tools'),
   };
 }
 
@@ -111,12 +113,26 @@ function ensureAnalyzed(repoDir: string): void {
   sh('openlore', ['analyze', '--no-embed'], repoDir);
 }
 
-/** WITH-condition MCP config: openlore server, one-shot (no watcher). */
-function withMcpConfig(work: string): string {
-  const cfg = { mcpServers: { openlore: { command: 'openlore', args: ['mcp', '--no-watch-auto'] } } };
-  const p = join(work, 'openlore-mcp.json');
-  writeFileSync(p, JSON.stringify(cfg, null, 2), 'utf-8');
-  return p;
+/**
+ * MCP config files for the two arms. Both arms run with `--strict-mcp-config` so
+ * the agent uses ONLY these files and ignores the user's global/project MCP
+ * config — otherwise a globally-registered openlore would leak into the WITHOUT
+ * baseline and erase the very difference we measure. (CodeGraph's published
+ * benchmark uses the same `--strict-mcp-config` isolation.)
+ */
+function writeMcpConfigs(work: string, fullTools: boolean): { openlore: string; empty: string } {
+  // WITH = openlore as recommended: one-shot, and by default `--minimal` (5 core
+  // tools) rather than the full ~45 — the MCP best-practice that tool schemas
+  // for tools the agent never calls are pure per-request overhead (~2–4k tokens
+  // per 20 tools). `--with-full-tools` flips this to expose all 45 for the
+  // overhead comparison.
+  const oloreArgs = ['mcp', '--no-watch-auto', ...(fullTools ? [] : ['--minimal'])];
+  const openlore = join(work, `openlore-mcp${fullTools ? '-full' : '-minimal'}.json`);
+  writeFileSync(openlore, JSON.stringify({ mcpServers: { openlore: { command: 'openlore', args: oloreArgs } } }, null, 2), 'utf-8');
+  // WITHOUT = no MCP at all (empty server map) under --strict-mcp-config.
+  const empty = join(work, 'empty-mcp.json');
+  writeFileSync(empty, JSON.stringify({ mcpServers: {} }, null, 2), 'utf-8');
+  return { openlore, empty };
 }
 
 // ── Oracle verification (grep the clone for each expected substring) ─────────
@@ -128,7 +144,7 @@ function fileList(dir: string): string[] {
       if (skip.has(e.name)) continue;
       const p = join(d, e.name);
       if (e.isDirectory()) walk(p);
-      else if (/\.(ts|tsx|js|jsx|py|go)$/.test(e.name)) out.push(p);
+      else if (/\.(ts|tsx|js|jsx|py|go|rs|java|kt|swift|rb|php|cs|c|cc|cpp|h|hpp)$/.test(e.name)) out.push(p);
     }
   };
   walk(dir);
@@ -153,7 +169,7 @@ function score(task: BenchTask, answer: string): boolean {
   return task.expect.mustInclude.every((s) => a.includes(s.toLowerCase()));
 }
 
-function runAgent(task: BenchTask, repoDir: string, condition: Condition, opts: Opts, mcpConfigPath: string, runIdx: number): Metrics {
+function runAgent(task: BenchTask, repoDir: string, condition: Condition, opts: Opts, configs: { openlore: string; empty: string }, runIdx: number): Metrics {
   if (opts.dryRun) {
     // MOCK: exercise the scoring + aggregation pipeline at $0, no agent call.
     // WITH gets a fuller answer (includes the expected substrings) and fewer
@@ -189,9 +205,12 @@ function runAgent(task: BenchTask, repoDir: string, condition: Condition, opts: 
     // Keep both conditions grounded in the repo — neither may "cheat" by
     // googling the library's internals.
     '--disallowedTools', 'WebSearch', 'WebFetch',
+    // Use ONLY the configs we pass — ignore the user's global/project MCP so a
+    // globally-registered openlore can't leak into the WITHOUT baseline.
+    '--strict-mcp-config',
+    '--mcp-config', condition === 'with' ? configs.openlore : configs.empty,
   ];
   if (condition === 'with') {
-    args.push('--mcp-config', mcpConfigPath);
     // WITH = openlore AS INSTALLED: the shipped orient skill instructs the agent
     // to call orient() before reading files. Without this the agent may ignore
     // the tools and grep anyway (paying the MCP overhead for nothing), which
@@ -285,10 +304,10 @@ function renderReport(
   L.push('### Methodology');
   L.push('');
   L.push(`- **Agent:** \`claude -p --output-format json\`, model \`${opts.model}\`, ${opts.runs} run(s)/task, median reported.`);
-  L.push('- **Conditions:** WITHOUT = the unmodified agent (its grep/read tools only) — the baseline. WITH = openlore **as installed**: the MCP server via `--mcp-config` (`openlore mcp --no-watch-auto`, repo pre-analyzed with `openlore analyze --no-embed`) **plus** a system-prompt instruction to call `orient()` before reading files — a faithful mirror of the shipped `openlore-orient` skill. This measures the product a user actually gets, not tools the agent might ignore.');
+  L.push(`- **Isolation:** both arms run with \`--strict-mcp-config\` so the agent uses ONLY the config we pass (a globally-registered openlore can't leak into the baseline). Same as CodeGraph's published benchmark.`);
+  L.push(`- **Conditions:** WITHOUT = empty MCP config (grep/read tools only) — the baseline. WITH = openlore **as installed**: \`openlore mcp --no-watch-auto ${opts.withFullTools ? '' : '--minimal'}\` (${opts.withFullTools ? 'all ~45 tools' : '**--minimal**, 5 core tools — the MCP best-practice of not paying schema overhead for tools the agent never calls'}), repo pre-analyzed with \`openlore analyze --no-embed\`, **plus** a system-prompt instruction to call \`orient()\` before reading files (a faithful mirror of the shipped \`openlore-orient\` skill — measures the product, not tools the agent ignores).`);
   L.push('- **Scoring:** correct = the agent\'s final answer contains every independently-verifiable expected substring (`expect.mustInclude` in `bench-agent.tasks.ts`), confirmed against the pinned source by grep — not derived from openlore\'s own graph.');
   L.push('- **Metrics:** **cost (USD)** is the bottom line (it prices fresh vs cached tokens correctly). Tokens are broken into *fresh* input (`input_tokens` + cache creation — what the model processed fresh) and *cached* reads (`cache_read_input_tokens` — ~10× cheaper); plus output, round-trips (`num_turns`), wall-clock.');
-  L.push('- **Cache caveat:** the WITH condition loads ~45 openlore MCP tool definitions into the system prompt every call, which inflates *cached-read* tokens but costs little. A single lumped token count would therefore mislead; we lead with cost and show the breakdown.');
   L.push('');
   L.push('### Pinned repos');
   L.push('');
@@ -341,7 +360,7 @@ async function main(): Promise<void> {
   }
 
   mkdirSync(opts.work, { recursive: true });
-  const mcpConfigPath = withMcpConfig(opts.work);
+  const configs = writeMcpConfigs(opts.work, opts.withFullTools);
 
   // Setup: clone @ SHA + analyze (skip with --skip-setup to reuse a prior setup).
   const repoDirs = new Map<string, string>();
@@ -372,8 +391,8 @@ async function main(): Promise<void> {
     const without: Metrics[] = [];
     const withRuns: Metrics[] = [];
     for (let i = 0; i < opts.runs; i++) {
-      without.push(runAgent(task, dir, 'without', opts, mcpConfigPath, i));
-      withRuns.push(runAgent(task, dir, 'with', opts, mcpConfigPath, i));
+      without.push(runAgent(task, dir, 'without', opts, configs, i));
+      withRuns.push(runAgent(task, dir, 'with', opts, configs, i));
     }
     perTask.push({ task, without: summarize(without), with: summarize(withRuns) });
     console.error(`[bench-agent] done: ${task.id}`);
