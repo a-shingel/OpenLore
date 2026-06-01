@@ -18,7 +18,8 @@
  */
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { REPOS, TASKS, type PinnedRepo, type BenchTask } from './bench-agent.tasks.js';
 
@@ -34,7 +35,8 @@ interface Opts {
   out: string;
   maxBudgetUsd: number;
   skipSetup: boolean;
-  withFullTools: boolean;   // WITH exposes all ~45 tools instead of --minimal's 5
+  withFullTools: boolean;   // WITH exposes all ~45 tools instead of a lean preset
+  withPreset: string;       // lean tool preset for the WITH arm (default: navigation)
 }
 
 function parseArgs(argv: string[]): Opts {
@@ -58,6 +60,7 @@ function parseArgs(argv: string[]): Opts {
     maxBudgetUsd: parseFloat(get('--max-budget-usd') ?? '2'),
     skipSetup: argv.includes('--skip-setup'),
     withFullTools: argv.includes('--with-full-tools'),
+    withPreset: get('--with-preset') ?? 'navigation',
   };
 }
 
@@ -120,15 +123,24 @@ function ensureAnalyzed(repoDir: string): void {
  * baseline and erase the very difference we measure. (CodeGraph's published
  * benchmark uses the same `--strict-mcp-config` isolation.)
  */
-function writeMcpConfigs(work: string, fullTools: boolean): { openlore: string; empty: string } {
-  // WITH = openlore as recommended: one-shot, and by default `--minimal` (5 core
-  // tools) rather than the full ~45 — the MCP best-practice that tool schemas
-  // for tools the agent never calls are pure per-request overhead (~2–4k tokens
-  // per 20 tools). `--with-full-tools` flips this to expose all 45 for the
-  // overhead comparison.
-  const oloreArgs = ['mcp', '--no-watch-auto', ...(fullTools ? [] : ['--minimal'])];
-  const openlore = join(work, `openlore-mcp${fullTools ? '-full' : '-minimal'}.json`);
-  writeFileSync(openlore, JSON.stringify({ mcpServers: { openlore: { command: 'openlore', args: oloreArgs } } }, null, 2), 'utf-8');
+/** The repo's freshly-built CLI — so the bench tests THIS code (incl. new
+ *  presets), not whatever `openlore` version happens to be installed globally. */
+function localCli(): string {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+  const cli = join(repoRoot, 'dist', 'cli', 'index.js');
+  if (!existsSync(cli)) throw new Error(`Local build not found at ${cli} — run \`npm run build\` first.`);
+  return cli;
+}
+
+function writeMcpConfigs(work: string, opts: { fullTools: boolean; preset: string }): { openlore: string; empty: string } {
+  // WITH = openlore as recommended. By default a lean **--preset** (navigation:
+  // 7 graph-traversal tools) rather than the full ~45 — the MCP best-practice
+  // that tool schemas for tools the agent never calls are pure per-request
+  // overhead. `--with-full-tools` exposes all 45 for the overhead comparison.
+  const cli = localCli();
+  const oloreArgs = ['mcp', '--no-watch-auto', ...(opts.fullTools ? [] : ['--preset', opts.preset])];
+  const openlore = join(work, `openlore-mcp-${opts.fullTools ? 'full' : opts.preset}.json`);
+  writeFileSync(openlore, JSON.stringify({ mcpServers: { openlore: { command: 'node', args: [cli, ...oloreArgs] } } }, null, 2), 'utf-8');
   // WITHOUT = no MCP at all (empty server map) under --strict-mcp-config.
   const empty = join(work, 'empty-mcp.json');
   writeFileSync(empty, JSON.stringify({ mcpServers: {} }, null, 2), 'utf-8');
@@ -305,7 +317,7 @@ function renderReport(
   L.push('');
   L.push(`- **Agent:** \`claude -p --output-format json\`, model \`${opts.model}\`, ${opts.runs} run(s)/task, median reported.`);
   L.push(`- **Isolation:** both arms run with \`--strict-mcp-config\` so the agent uses ONLY the config we pass (a globally-registered openlore can't leak into the baseline). Same as CodeGraph's published benchmark.`);
-  L.push(`- **Conditions:** WITHOUT = empty MCP config (grep/read tools only) — the baseline. WITH = openlore **as installed**: \`openlore mcp --no-watch-auto ${opts.withFullTools ? '' : '--minimal'}\` (${opts.withFullTools ? 'all ~45 tools' : '**--minimal**, 5 core tools — the MCP best-practice of not paying schema overhead for tools the agent never calls'}), repo pre-analyzed with \`openlore analyze --no-embed\`, **plus** a system-prompt instruction to call \`orient()\` before reading files (a faithful mirror of the shipped \`openlore-orient\` skill — measures the product, not tools the agent ignores).`);
+  L.push(`- **Conditions:** WITHOUT = empty MCP config (grep/read tools only) — the baseline. WITH = openlore (the repo's **local build**): \`openlore mcp --no-watch-auto ${opts.withFullTools ? '' : '--preset ' + opts.withPreset}\` (${opts.withFullTools ? 'all ~45 tools' : `**--preset ${opts.withPreset}** — a lean graph-navigation surface, the MCP best-practice of not paying schema overhead for tools the agent never calls`}), repo pre-analyzed with \`openlore analyze --no-embed\`, **plus** a system-prompt instruction to call \`orient()\` before reading files (a faithful mirror of the shipped \`openlore-orient\` skill — measures the product, not tools the agent ignores).`);
   L.push('- **Scoring:** correct = the agent\'s final answer contains every independently-verifiable expected substring (`expect.mustInclude` in `bench-agent.tasks.ts`), confirmed against the pinned source by grep — not derived from openlore\'s own graph.');
   L.push('- **Metrics:** **cost (USD)** is the bottom line (it prices fresh vs cached tokens correctly). Tokens are broken into *fresh* input (`input_tokens` + cache creation — what the model processed fresh) and *cached* reads (`cache_read_input_tokens` — ~10× cheaper); plus output, round-trips (`num_turns`), wall-clock.');
   L.push('');
@@ -360,7 +372,7 @@ async function main(): Promise<void> {
   }
 
   mkdirSync(opts.work, { recursive: true });
-  const configs = writeMcpConfigs(opts.work, opts.withFullTools);
+  const configs = writeMcpConfigs(opts.work, { fullTools: opts.withFullTools, preset: opts.withPreset });
 
   // Setup: clone @ SHA + analyze (skip with --skip-setup to reuse a prior setup).
   const repoDirs = new Map<string, string>();

@@ -1282,12 +1282,29 @@ const MINIMAL_TOOLS = new Set([
   'orient', 'search_code', 'record_decision', 'detect_changes', 'check_spec_drift',
 ]);
 
+// Named tool presets (Spec 14). A small, navigation-focused surface keeps the
+// per-request tool-schema overhead low (the MCP best-practice: schemas for tools
+// the agent never calls are pure overhead) while still exposing the graph-
+// traversal tools a "how does X reach Y" task actually needs — which `minimal`
+// (orient + search + governance) omits. CodeGraph wins its benchmark with a
+// surface like this; openlore's was either too lean (no traversal) or all ~45.
+const TOOL_PRESETS: Record<string, Set<string>> = {
+  minimal: MINIMAL_TOOLS,
+  // Graph-navigation core: orient to enter, then traverse/trace/impact + compact
+  // symbol bodies — no governance tools, no inventories.
+  navigation: new Set([
+    'orient', 'search_code', 'get_subgraph', 'trace_execution_path',
+    'analyze_impact', 'suggest_insertion_points', 'get_function_skeleton',
+  ]),
+};
+
 interface McpServerOptions {
   watch?: string;
   watchAuto?: boolean;
   watchDebounce?: string;
   watchNoEmbed?: boolean;
   minimal?: boolean;
+  preset?: string;
 }
 
 async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
@@ -1306,8 +1323,14 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   console.warn = toStderr;
   console.debug = toStderr;
 
-  const activeTools = options.minimal
-    ? TOOL_DEFINITIONS.filter(t => MINIMAL_TOOLS.has(t.name))
+  // --preset takes precedence over --minimal (which is the 'minimal' preset).
+  const presetName = options.preset ?? (options.minimal ? 'minimal' : undefined);
+  if (presetName && !TOOL_PRESETS[presetName]) {
+    throw new Error(`Unknown --preset "${presetName}". Known presets: ${Object.keys(TOOL_PRESETS).join(', ')}.`);
+  }
+  const presetTools = presetName ? TOOL_PRESETS[presetName] : undefined;
+  const activeTools = presetTools
+    ? TOOL_DEFINITIONS.filter(t => presetTools.has(t.name))
     : TOOL_DEFINITIONS;
 
   // Report the real package version in the MCP initialize handshake rather
@@ -1615,4 +1638,5 @@ export const mcpCommand = new Command('mcp')
   .option('--watch-debounce <ms>', 'Debounce delay in ms before re-indexing after a file change (default: 400)', '400')
   .option('--watch-no-embed', 'Watch signatures only — skip live vector re-embedding (embeddings refresh at commit). Large repos auto-degrade to this.')
   .option('--minimal', 'Expose only core 5 tools (orient, search_code, record_decision, detect_changes, check_spec_drift). Pair with alwaysLoad: true in Claude Code for always-visible core tools.')
+  .option('--preset <name>', 'Expose a named tool preset instead of all ~45. "minimal" = orient+search+governance; "navigation" = graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton) for low-overhead code navigation. Takes precedence over --minimal.')
   .action((options: McpServerOptions) => startMcpServer(options));
