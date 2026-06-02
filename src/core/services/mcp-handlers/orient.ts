@@ -444,6 +444,32 @@ export async function handleOrient(
     // non-fatal — provenance is additive and local-only
   }
 
+  // ── Change coupling & volatility (local git, spec-22) ──────────────────────
+  // Caution signals mined from git history: "frequently changes with …" surfaces
+  // invisible coupling (no import/call edge), "volatility: high" flags risky churn.
+  // Additive, advisory — correlation, not a rule.
+  let changeCoupling:
+    | Array<{ file: string; volatility: 'high' | 'medium' | 'low'; changes: number; frequentlyChangesWith: Array<{ file: string; confidence: number }> }>
+    | undefined;
+  try {
+    const es = llmCtx?.edgeStore;
+    if (es && relevantFiles.length > 0) {
+      const { volatilityLevel } = await import('../../provenance/change-coupling.js');
+      const records = es.getChangeCouplingForFiles(relevantFiles)
+        .filter((r) => r.churn > 0 && (volatilityLevel(r.churn) !== 'low' || r.coupledWith.length > 0));
+      if (records.length > 0) {
+        changeCoupling = records.slice(0, 10).map((r) => ({
+          file: r.filePath,
+          volatility: volatilityLevel(r.churn),
+          changes: r.churn,
+          frequentlyChangesWith: r.coupledWith.slice(0, 5).map((c) => ({ file: c.file, confidence: c.confidence })),
+        }));
+      }
+    }
+  } catch {
+    // non-fatal — change coupling is additive and local-only
+  }
+
   // ── Suggested tools (portable discovery for non-Claude Code clients) ─────
   // Derived from what orient already knows — no extra I/O.
   const _suggested: string[] = ['record_decision'];
@@ -496,6 +522,7 @@ export async function handleOrient(
     ...(pendingDecisions !== undefined ? { pendingDecisions } : {}),
     ...(governingDecisions !== undefined ? { governingDecisions } : {}),
     ...(provenance !== undefined ? { provenance } : {}),
+    ...(changeCoupling !== undefined ? { changeCoupling } : {}),
     suggestedTools,
     nextSteps,
   };

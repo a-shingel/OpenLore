@@ -1308,6 +1308,16 @@ export async function writeEdgesToSQLite(
       } catch {
         // Provenance is additive and local-only; never block the graph write.
       }
+
+      // Mine change coupling & volatility from local git history (spec-22).
+      // Local-only, bounded, best-effort; advisory signals, never blocks analyze.
+      try {
+        const { analyzeChangeCoupling } = await import('../provenance/change-coupling.js');
+        const coupling = await analyzeChangeCoupling(rootPath);
+        if (coupling.churn.size > 0) store.insertChangeCoupling(coupling);
+      } catch {
+        // Change-coupling is additive and local-only; never block the graph write.
+      }
     }
   } finally {
     store.close();

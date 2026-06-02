@@ -327,6 +327,48 @@ describe('EdgeStore', () => {
     });
   });
 
+  // ── Change coupling & volatility (spec-22) ─────────────────────────────────────
+  describe('change coupling', () => {
+    const result = {
+      churn: new Map([['src/a.ts', 4], ['src/b.ts', 4], ['src/c.ts', 1]]),
+      coupling: new Map([
+        ['src/a.ts', [{ file: 'src/b.ts', support: 4, confidence: 1 }]],
+        ['src/b.ts', [{ file: 'src/a.ts', support: 4, confidence: 1 }]],
+      ]),
+      stats: { commitsScanned: 5, bulkCommitsFiltered: 1, filesTracked: 3 },
+    };
+
+    beforeEach(() => store.insertChangeCoupling(result));
+
+    it('persists churn for every tracked file (coupling may be empty)', () => {
+      expect(store.countChangeCoupling()).toBe(3);
+      const c = store.getChangeCouplingForFiles(['src/c.ts']);
+      expect(c[0]).toMatchObject({ filePath: 'src/c.ts', churn: 1, coupledWith: [] });
+    });
+
+    it('round-trips coupling for a file', () => {
+      const a = store.getChangeCouplingForFiles(['src/a.ts']);
+      expect(a[0]).toMatchObject({ filePath: 'src/a.ts', churn: 4, coupledWith: [{ file: 'src/b.ts', support: 4, confidence: 1 }] });
+    });
+
+    it('matches across relative/absolute path forms', () => {
+      expect(store.getChangeCouplingForFiles(['/abs/proj/src/a.ts']).map(r => r.filePath)).toEqual(['src/a.ts']);
+    });
+
+    it('getTopVolatile returns highest-churn files first', () => {
+      const top = store.getTopVolatile(2);
+      expect(top.map(r => r.churn)).toEqual([4, 4]);
+    });
+
+    it('insertChangeCoupling replaces the prior snapshot; clearAll wipes it', () => {
+      store.insertChangeCoupling({ churn: new Map([['src/z.ts', 2]]), coupling: new Map(), stats: { commitsScanned: 1, bulkCommitsFiltered: 0, filesTracked: 1 } });
+      expect(store.countChangeCoupling()).toBe(1);
+      expect(store.getChangeCouplingForFiles(['src/a.ts'])).toEqual([]);
+      store.clearAll();
+      expect(store.countChangeCoupling()).toBe(0);
+    });
+  });
+
   // ── Decision projection (spec-16) ─────────────────────────────────────────────
   describe('decisions', () => {
     const decNode = {

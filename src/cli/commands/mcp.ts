@@ -58,6 +58,7 @@ import { handleOrient } from '../../core/services/mcp-handlers/orient.js';
 import { handleSelectTests } from '../../core/services/mcp-handlers/test-impact.js';
 import { handleFindDeadCode } from '../../core/services/mcp-handlers/reachability.js';
 import { handleStructuralDiff } from '../../core/services/mcp-handlers/structural-diff.js';
+import { handleGetChangeCoupling } from '../../core/services/mcp-handlers/change-coupling.js';
 import { handleGenerateChangeProposal, handleAnnotateStory } from '../../core/services/mcp-handlers/change.js';
 import {
   handleRecordDecision,
@@ -510,6 +511,25 @@ export const TOOL_DEFINITIONS = [
         baseRef: { type: 'string', description: 'Old state to diff against (default "HEAD")' },
         headRef: { type: 'string', description: 'New state (a git ref). Omit to use the working tree.' },
         maxResults: { type: 'number', description: 'Cap reported items per category (default 200)' },
+      },
+      required: ['directory'],
+    },
+  },
+  {
+    name: 'get_change_coupling',
+    description:
+      'USE THIS WHEN: "what changes together with this file?" or "what is the most volatile code?". ' +
+      'Mined from local git history (not the call graph): co-change coupling surfaces invisible ' +
+      'coupling with no import/call edge (the config + parser that move in lockstep), and ' +
+      'volatility/churn flags risky high-change code. Pass a file for its coupling, or omit for the ' +
+      'most-volatile overview. Advisory signal (correlation, not causation); bulk commits filtered. ' +
+      'Run analyze_codebase first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: 'Absolute path to the project directory' },
+        file: { type: 'string', description: 'A file to query its coupling/volatility. Omit for the most-volatile overview.' },
+        limit: { type: 'number', description: 'Cap results (default 20)' },
       },
       required: ['directory'],
     },
@@ -1334,7 +1354,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   orient: _RO, analyze_codebase: _RWI, get_architecture_overview: _RO,
   get_refactor_report: _RO, get_call_graph: _RO, get_duplicate_report: _RO,
   get_signatures: _RO, get_subgraph: _RO, trace_execution_path: _RO,
-  get_mapping: _RO, check_spec_drift: _RO, analyze_impact: _RO, select_tests: _RO, find_dead_code: _RO, structural_diff: _RO,
+  get_mapping: _RO, check_spec_drift: _RO, analyze_impact: _RO, select_tests: _RO, find_dead_code: _RO, structural_diff: _RO, get_change_coupling: _RO,
   get_low_risk_refactor_candidates: _RO, get_leaf_functions: _RO,
   get_critical_hubs: _RO, get_function_skeleton: _RO, get_god_functions: _RO,
   suggest_insertion_points: _RO, search_code: _RO, list_spec_domains: _RO,
@@ -1540,6 +1560,9 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         const { directory, baseRef, headRef, maxResults } =
           args as { directory: string; baseRef?: string; headRef?: string; maxResults?: number };
         result = await handleStructuralDiff({ directory, baseRef, headRef, maxResults });
+      } else if (name === 'get_change_coupling') {
+        const { directory, file, limit } = args as { directory: string; file?: string; limit?: number };
+        result = await handleGetChangeCoupling({ directory, file, limit });
       } else if (name === 'get_low_risk_refactor_candidates') {
         const { directory, limit = 5, filePattern } =
           args as { directory: string; limit?: number; filePattern?: string };
