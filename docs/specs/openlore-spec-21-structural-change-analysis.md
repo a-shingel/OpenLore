@@ -7,7 +7,7 @@
 
 ## Progress
 
-Branch: `openlore-spec-21-structural-change-analysis`. **DONE** (PR pending).
+Branch: `openlore-spec-21-structural-change-analysis`. **DONE** — [PR #116](https://github.com/clay-good/OpenLore/pull/116).
 
 - [x] Graph delta between two states — `structural_diff` builds two in-memory snapshots from just
       the changed files (old via `git show <base>:<file>`, new via working tree / `headRef`),
