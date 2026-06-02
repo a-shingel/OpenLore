@@ -8,7 +8,7 @@
 
 ## Progress
 
-Branch: `openlore-spec-23-architecture-invariants`. **In progress** — the final spec of the
+Branch: `openlore-spec-23-architecture-invariants`. **In progress** — [PR #119](https://github.com/clay-good/OpenLore/pull/119). The final spec of the
 13–23 arc. This PR carries the spec-23 feature **plus** a set of pre-flight hotfixes (below).
 
 High-level deliverables:
