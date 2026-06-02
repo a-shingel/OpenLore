@@ -7,13 +7,26 @@
 
 ## Progress
 
-Branch: `openlore-spec-19-test-impact-selection`. Not started.
+Branch: `openlore-spec-19-test-impact-selection`. **DONE** (PR pending).
 
-- [ ] Backward reachability from changed functions/files to the tests that exercise them
-- [ ] Input from an explicit symbol set **or** a git diff (reuse drift's changed-file logic)
-- [ ] Output: the test set + the reaching path + an explicit soundness note
-- [ ] Surfaced through the MCP layer; deterministic and offline
-- [ ] Tests over a fixture with known test→code reachability
+- [x] Backward reachability from changed functions/files to the tests that exercise them —
+      path-tracked BFS over `buildAdjacency`'s backward map (`calls` + inheritance), collecting
+      `isTest` nodes, plus a `tested_by`-edge harvest for import-based associations.
+      [test-impact.ts](../../src/core/services/mcp-handlers/test-impact.ts).
+- [x] Input from an explicit symbol set **or** a git diff — `diffRef` reuses the drift
+      subsystem's `getChangedFiles()` ([git-diff.ts](../../src/core/drift/git-diff.ts)), mapped to
+      function nodes by tolerant path match.
+- [x] Output: the test set + per-test reaching path + confidence, an explicit `soundness` banner
+      (`posture: "over-approximate"` + caveats) and honest `coverage`
+      (`testDetection: full|partial|none` — never a false-empty).
+- [x] Surfaced through the MCP layer — new read-only `select_tests` tool (46 total; def +
+      dispatch + annotation in [mcp.ts](../../src/cli/commands/mcp.ts)); deterministic, offline,
+      no schema change (reuses existing `calls`/`tested_by` edges + `isTest`).
+- [x] Tests over a fixture with known test→code reachability (paths, upstream-only selection,
+      `none`-coverage honesty, no-seed message, seed resolution) —
+      [test-impact.test.ts](../../src/core/services/mcp-handlers/test-impact.test.ts). Validated
+      that the analyzer emits `tested_by` on real co-located source+test files. Full suite green
+      (3001 passing / 135 files). Doc: [docs/test-impact-selection.md](../test-impact-selection.md).
 
 ---
 
