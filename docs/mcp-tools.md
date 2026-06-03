@@ -32,9 +32,11 @@ or for local development:
 
 **Cline / Roo Code / Kilocode** -- add the same block under `mcpServers` in the MCP settings JSON of your editor.
 
-### Recommended lean surface (cost, Spec 25 P1)
+### Recommended lean surface (cost, Spec 25 P1 · Spec 28)
 
-MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The Spec 14 benchmark showed this is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)). Two ways to get the lean surface, in order of preference:
+MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The full surface is **50 tools / ~46 KB / ~11.5k tokens** of `tools/list`. The Spec 14 benchmark showed this prefix is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)).
+
+**Spec 28 measured how far the *server* can shrink that prefix, honestly:** MCP has no server-driven lazy-schema mechanism (`tools/list` always returns full schemas), and the lossless server-side byte-lever is only ~2% — the payload is dominated by irreducible per-tool schema structure plus the selection text an agent needs to pick a tool. So the real lever is the *client* (deferred schemas, below) and *tool count* (`--preset`), not byte-shaving. The surface has been trimmed losslessly anyway (shared param descriptions, no boilerplate) and is now **bounded by a regression guard** so it can't silently bloat. Two ways to get the lean surface, in order of preference:
 
 1. **Deferred schemas (best — keeps every tool available).** If your client supports it (Claude Code: `alwaysLoad: false`), advertise tool *names* cheaply and load a tool's schema only when it's used. See the [two-server setup](agent-setup.md) — you keep all 50 tools without paying their schema cost up front.
 2. **`--preset navigation` (server-side, navigation-only).** Add `"args": ["mcp", "--preset", "navigation"]` for a 7-tool graph-traversal surface (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton). This is exactly the configuration the benchmark measured (−7%→−21% cost, −26% round-trips on deep traces). Note it omits the governance tools (`record_decision`, `check_architecture`, inventories), so prefer option 1 if you use the decision gate or architecture checks during a session.
@@ -208,12 +210,18 @@ Most tools run on **pure static analysis** — no LLM quota consumed. Exceptions
 
 **`orient`**
 ```
-directory  string   Absolute path to the project directory
-task       string   Natural-language description of the task, e.g. "add rate limiting to the API"
-limit      number   Max relevant functions to return (default: 5, max: 20)
+directory    string   Absolute path to the project directory
+task         string   Natural-language description of the task, e.g. "add rate limiting to the API"
+limit        number   Max relevant functions to return (default: 5, max: 20)
+tokenBudget  number   Optional: cap relevantFunctions to ~this many tokens (Spec 25 P4) —
+                      highest-scored kept, exact duplicates collapsed; each carries an `expand` handle
+lean         boolean  Optional: return only the navigation core (relevantFunctions + callPaths +
+                      specDomains + suggestedTools), dropping enrichment (Spec 27). See below.
 ```
 
 Response includes `suggestedTools: string[]` — a ranked list of openlore tool names relevant to the task, derived from hub presence, spec domains, and task keywords. No extra I/O. Use this on clients without Tool Search (Cline, Cursor, OpenCode) to know which tools to call next without enumerating all 50.
+
+**Lean mode (Spec 27).** `lean: true` (CLI: `orient --lean`) returns only the navigation core for shallow "who calls X / where is Y" lookups — ~40% smaller than the rich default on this repo. Everything dropped (insertion points, provenance, change-coupling, inline specs, matching specs, decisions, architecture violations) is one `expand` handle or one dedicated tool call away, so it trims bytes per turn without forcing a follow-up round-trip. Lean is also **compute-lean** (Spec 27 P5): it skips the work behind those blocks — the extra spec-embedding search, manifest/spec-file reads, the decision-store load, and the git-derived joins — so the shallow path is faster, not only smaller. The rich default is unchanged; omit `lean` when you need specs, decisions, or insertion points.
 
 **`analyze_codebase`**
 ```
