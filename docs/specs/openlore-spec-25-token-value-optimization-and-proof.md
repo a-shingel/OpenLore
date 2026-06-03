@@ -8,6 +8,23 @@
 
 ---
 
+## Progress
+
+Phasing in §8 (prove → optimize → re-prove). Implementation branch:
+`feat/spec-25-value-scorecard`.
+
+- [x] **Phase A — Prove the present, honestly.** README [Value Scorecard](../../README.md#value-scorecard--does-it-pay-for-itself)
+  built from the existing measured Spec-14 data (Round-1 loss + Round-2 win, **including the loss
+  cells**), prominent above the fold; replaced the unproven "15–50k tokens" / "replaces 10+ file
+  reads" estimates with measured cost/round-trip deltas; wrote the [honesty contract](../AGENT-BENCHMARKS.md#honesty-contract-spec-25)
+  into the repo. No new benchmark run required (Q1's re-base, which needs API budget, stays open).
+- [ ] Phase B — Cache + lean surface (P1): navigation preset as recommended default, cache-stable prefix, fresh/cached instrumentation.
+- [ ] Phase C — Progressive disclosure + adaptive sizing (P2–P4): minimal-sufficient responses + exact expansion handles, duplicate collapsing, `tokenBudget`.
+- [ ] Phase D — `openlore prove` (Q2): self-serve on-your-repo scorecard.
+- [ ] Q1 follow-up — re-based benchmark run on the target corpus (needs API budget); refresh the scorecard from it.
+
+---
+
 ## 0. The proposition, stated bluntly
 
 OpenLore has exactly one reason to exist: **an agent *with* OpenLore must reach a correct answer
