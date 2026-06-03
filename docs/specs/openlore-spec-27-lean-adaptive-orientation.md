@@ -12,14 +12,28 @@
 Branch: `feat/spec-27-lean-orientation`. Implementation lands incrementally; the scorecard is
 re-measured live and refreshed honestly (Spec 25 honesty contract applies).
 
-- [ ] **P1 — Lean orient response.** A `lean` mode that returns only the minimal-sufficient
-  navigation core + `expand` handles, dropping the heavy enrichment blocks. Deterministic; unit-tested.
-- [ ] **P2 — Wire lean into the navigation path.** The orient skill / benchmark navigation arm uses
-  lean orient (navigation tasks don't need governance/provenance enrichment).
-- [ ] **P3 — Re-measure live + refresh the scorecard.** Re-run the Phase E shallow + deep tasks with
-  lean orient; quantify the overhead reduction; update README + AGENT-BENCHMARKS.md + the honesty guard.
-- [ ] **P4 (explore) — Advisory orientation.** Consider making the orient nudge recommend-not-force on
-  trivial lookups. Measured, optional; only if it helps without hurting the deep-task win.
+- [x] **P1 — Lean orient response.** `lean` mode returns only the navigation core + `expand` handles,
+  dropping the enrichment blocks. Measured **2269 → 1357 tokens (40% smaller)** on this repo. MCP tool
+  option + `orient --lean` CLI flag; unit-tested; rich default unchanged.
+- [x] **P2 — Wire lean into the navigation path.** Skill guidance added (use `lean:true` for shallow
+  who/where lookups; omit it when you need specs/decisions/insertion-points). Benchmark `--lean-orient`
+  flag added to drive the measurement.
+- [x] **P3 — Re-measured live (2026-06-03). Honest result: lean does NOT close the shallow-task loss.**
+  express "who calls X" with lean orient: WITHOUT $0.024 / 3 turns vs WITH-lean $0.049 / 5 turns
+  (**+107%**) — no better than rich orient (+59% earlier). The loss is **structural**: on a trivial
+  lookup in a famous small repo the baseline already finishes in ~3 turns / ~1.9k tokens, so *any*
+  orient call (lean or rich) — one extra round-trip + its response — costs more than the whole answer.
+  Lean cuts the *payload* 40% (helps every orient call, especially deep ones and borderline cases) but
+  cannot remove the *round-trip*, which is the dominant cost on trivial tasks. Reported, not buried.
+- [ ] **P4 — Advisory orientation (explored, NOT implemented).** The only lever left for the trivial
+  case is *not making the orient round-trip at all* — but the data is a coin-flip (chalk benefits from
+  orienting, express doesn't), and an agent can't reliably tell ahead of time, so forcing the choice
+  risks the deep-task win. We deliberately do not ship a heuristic that guesses. The honest answer
+  stays: `openlore prove` lets each user measure their own repo + task mix.
+
+**Net (honest):** lean orient is a real, shipped efficiency improvement (40% smaller orient payload,
+deterministic, no downside — enrichment stays one `expand` away). It does **not** eliminate the
+small-repo/shallow-task loss, which is structural. We ship the win and report the limit plainly.
 
 ---
 
