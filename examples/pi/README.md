@@ -41,8 +41,8 @@ Manual: copy `openlore.ts` into either location.
 > `@earendil-works/pi-ai`, extension types from `@earendil-works/pi-coding-agent`).
 > If a future Pi version moves these, adjust the imports at the top of `openlore.ts`.
 >
-> Uses `ctx.mode` (0.78.1+) to adapt injection depth: full digest + orient in `tui`,
-> orient-only in `rpc`, no injection in `json`/`print` (one-shot modes).
+> Uses `ctx.mode` (0.78.1+): full injection in `tui` and `rpc` (both interactive — `rpc`
+> is headless for IDE/custom UI embedding), no injection in `json`/`print` (one-shot).
 
 ## How it works
 

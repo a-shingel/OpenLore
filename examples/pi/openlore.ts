@@ -21,7 +21,7 @@
  *
  * Imports verified against pi 0.78.1 (`Type` from typebox, `StringEnum` from
  * @earendil-works/pi-ai, extension types from @earendil-works/pi-coding-agent).
- * Uses ctx.mode (0.78.1+) to adapt injection depth across tui/rpc/json/print modes.
+ * Uses ctx.mode (0.78.1+): full injection in tui/rpc (interactive), none in json/print (one-shot).
  */
 
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
@@ -317,9 +317,9 @@ export default function openlore(pi: ExtensionAPI): void {
 
   // ── C: context injection on the first turn ──
   // Injection depth varies by mode:
-  //   tui   — full: architecture digest + spec index + task orient (interactive sessions)
-  //   rpc   — orient only: callers want structured context, not the full prose digest
-  //   json/print — none: one-shot output, let the model work without injected noise
+  //   tui/rpc — full: architecture digest + spec index + task orient
+  //             rpc = headless interactive session (IDE, custom UI) — same needs as tui
+  //   json/print — none: one-shot output, no injected context needed
   pi.on('before_agent_start', async (event: { systemPrompt: string }) => {
     const cwd = sessionCwd;
     const mode = sessionMode;
@@ -328,13 +328,9 @@ export default function openlore(pi: ExtensionAPI): void {
     if (primed.has(cwd)) return undefined;
     primed.add(cwd);
 
-    // In rpc mode, check if upstream already injected openlore context (e.g. from
-    // getSystemPromptOptions) to avoid doubling. Skip digest + spec index; keep orient.
-    const isRpc = mode === 'rpc';
-
     const blocks: string[] = [];
 
-    if (!isRpc) {
+    {
       const digest = await readDigest(cwd);
       if (digest) blocks.push('# Codebase architecture (openlore)\n\n' + truncate(digest, 8000));
 
