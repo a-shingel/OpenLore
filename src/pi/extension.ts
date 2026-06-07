@@ -209,7 +209,8 @@ async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig 
       'Save & close',
     ]);
 
-    if (!choice || choice === 'Save & close') break;
+    if (!choice) return; // escaped — discard all changes
+    if (choice === 'Save & close') break;
 
     if (choice === genLabel) {
       generation = await configureGeneration(ui, { ...existing, generation } as OpenLoreConfig);
