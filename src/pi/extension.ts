@@ -105,21 +105,10 @@ async function fetchModels(baseUrl: string, apiKey?: string): Promise<string[] |
 
 // ── Config wizard ─────────────────────────────────────────────────────────────
 
-async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig | null): Promise<void> {
-  const { ui } = ctx;
-
-  if (existing?.generation) {
-    const g = existing.generation;
-    const parts = [`provider: ${g.provider ?? '—'}`, `model: ${g.model ?? '—'}`];
-    if (g.openaiCompatBaseUrl) parts.push(`url: ${g.openaiCompatBaseUrl}`);
-    if (existing.embedding) parts.push(`embedding: ${existing.embedding.baseUrl}`);
-    ui.notify(`Current config — ${parts.join(' · ')}`, 'info');
-  }
-
-  // ui.select / ui.input / ui.confirm: undefined = cancelled, '' = empty.
-  // For edits, always fall back to existing values so partial navigation never destroys data.
-
-  // Put existing provider first with a star marker so it's visually obvious.
+async function configureGeneration(
+  ui: ExtensionContext['ui'],
+  existing?: OpenLoreConfig | null,
+): Promise<OpenLoreConfig['generation']> {
   const existingProvider = existing?.generation?.provider;
   const providerList = existingProvider
     ? [`${existingProvider} *`, ...PROVIDERS.filter((p) => p !== existingProvider)]
@@ -128,19 +117,18 @@ async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig 
   const provider = selectedProvider.replace(/ \*$/, '');
 
   let baseUrl: string | undefined = existing?.generation?.openaiCompatBaseUrl;
-  let genSkipSsl = existing?.generation?.skipSslVerify ?? false;
+  let skipSslVerify = existing?.generation?.skipSslVerify ?? false;
   let apiKey: string | undefined;
 
   if (provider === 'openai-compat') {
     const urlTitle = baseUrl ? `Base URL (current: ${baseUrl})` : 'Base URL';
     const rawUrl = await ui.input(urlTitle, 'http://localhost:11434');
     baseUrl = rawUrl || baseUrl || '';
-    genSkipSsl = await ui.confirm('Skip SSL verification?', 'Required for local servers with self-signed certificates');
+    skipSslVerify = await ui.confirm('Skip SSL verification?', 'Required for local servers with self-signed certificates');
   }
 
   if (!SYSTEM_AUTH_PROVIDERS.has(provider)) {
     const key = await ui.input('API key', '(blank to skip / keep existing)');
-    // Empty or placeholder means "keep existing" — we don't store keys so just omit.
     apiKey = key && key !== '(blank to skip / keep existing)' ? key : undefined;
   }
 
@@ -156,36 +144,81 @@ async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig 
     model = (await ui.input(modelTitle, PROVIDER_MODEL_DEFAULTS[provider] ?? '')) || existingModel;
   }
 
-  const maxFilesRaw = await ui.input('Max files to analyze', String(existing?.analysis?.maxFiles ?? 500));
-  const maxFiles = parseInt(maxFilesRaw ?? '500', 10) || 500;
+  return {
+    provider,
+    model,
+    ...(baseUrl ? { openaiCompatBaseUrl: baseUrl } : {}),
+    ...(skipSslVerify ? { skipSslVerify: true } : {}),
+  };
+}
 
-  // Embedding: if already configured, ask whether to change it — declining preserves existing.
-  let embedding: OpenLoreConfig['embedding'] | undefined = existing?.embedding;
-  const embedPrompt = existing?.embedding
-    ? `Change embedding? (current: ${existing.embedding.baseUrl})`
-    : 'Configure a custom embedding endpoint?';
-  const embedMessage = existing?.embedding
-    ? 'Select No to keep the current embedding configuration unchanged.'
-    : 'Optional — enables semantic search with a local embedding model (e.g. Ollama)';
-  const changeEmbed = await ui.confirm(embedPrompt, embedMessage);
-  if (changeEmbed) {
-    const embedUrl = (await ui.input('Embedding base URL', existing?.embedding?.baseUrl ?? '')) ?? '';
-    const embedSsl = await ui.confirm('Skip SSL verification for embedding?', 'Required for self-signed certificates');
-    const embedModels = embedUrl ? await fetchModels(embedUrl) : null;
-    let embedModel: string;
-    if (embedModels && embedModels.length > 0) {
-      embedModel = await ui.select('Embedding model', embedModels) ?? embedModels[0];
-    } else {
-      const existingEmbedModel = existing?.embedding?.model ?? '';
-      embedModel = (await ui.input('Embedding model', existingEmbedModel)) || existingEmbedModel;
+async function configureEmbedding(
+  ui: ExtensionContext['ui'],
+  existing?: OpenLoreConfig['embedding'],
+): Promise<OpenLoreConfig['embedding'] | undefined> {
+  const embedUrl = (await ui.input(
+    existing?.baseUrl ? `Embedding base URL (current: ${existing.baseUrl})` : 'Embedding base URL',
+    existing?.baseUrl ?? 'http://localhost:11434',
+  )) || existing?.baseUrl || '';
+  if (!embedUrl) return undefined;
+
+  const embedSsl = await ui.confirm('Skip SSL verification for embedding?', 'Required for self-signed certificates');
+  const embedModels = await fetchModels(embedUrl);
+  let embedModel: string;
+  if (embedModels && embedModels.length > 0) {
+    embedModel = await ui.select('Embedding model', embedModels) ?? embedModels[0];
+  } else {
+    const existingModel = existing?.model ?? '';
+    embedModel = (await ui.input(
+      existing?.model ? `Embedding model (current: ${existing.model})` : 'Embedding model',
+      '',
+    )) || existingModel;
+  }
+  const embedKey = await ui.input('Embedding API key', '(blank if not needed)') ?? '';
+
+  return {
+    baseUrl: embedUrl,
+    model: embedModel,
+    ...(embedKey && embedKey !== '(blank if not needed)' ? { apiKey: embedKey } : {}),
+    ...(embedSsl ? { skipSslVerify: true } : {}),
+  };
+}
+
+async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig | null): Promise<void> {
+  const { ui } = ctx;
+
+  // Mutable working copy — sections update independently until "Save".
+  let generation = existing?.generation ?? {};
+  let embedding = existing?.embedding;
+  let maxFiles = existing?.analysis?.maxFiles ?? 500;
+
+  // Menu loop — user picks which section to edit, repeats until Done.
+  while (true) {
+    const genLabel = generation.provider
+      ? `Generation  ${generation.provider} · ${generation.model ?? '—'}${generation.openaiCompatBaseUrl ? ' · ' + generation.openaiCompatBaseUrl : ''}`
+      : 'Generation  (not configured)';
+    const embedLabel = embedding
+      ? `Embedding   ${embedding.baseUrl} · ${embedding.model || '—'}`
+      : 'Embedding   (not configured)';
+    const analysisLabel = `Analysis    maxFiles=${maxFiles}`;
+
+    const choice = await ui.select('openlore config — what to change?', [
+      genLabel,
+      embedLabel,
+      analysisLabel,
+      'Save & close',
+    ]);
+
+    if (!choice || choice === 'Save & close') break;
+
+    if (choice === genLabel) {
+      generation = await configureGeneration(ui, { ...existing, generation } as OpenLoreConfig);
+    } else if (choice === embedLabel) {
+      embedding = await configureEmbedding(ui, embedding);
+    } else if (choice === analysisLabel) {
+      const raw = await ui.input(`Max files to analyze (current: ${maxFiles})`, '500');
+      maxFiles = parseInt(raw ?? '', 10) || maxFiles;
     }
-    const embedKey = await ui.input('Embedding API key', '(blank if not needed)') ?? '';
-    embedding = {
-      baseUrl: embedUrl,
-      model: embedModel,
-      ...(embedKey && embedKey !== '(blank if not needed)' ? { apiKey: embedKey } : {}),
-      ...(embedSsl ? { skipSslVerify: true } : {}),
-    };
   }
 
   const config: OpenLoreConfig = {
@@ -197,12 +230,7 @@ async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig 
       includePatterns: existing?.analysis?.includePatterns ?? [],
       excludePatterns: existing?.analysis?.excludePatterns ?? [],
     },
-    generation: {
-      provider,
-      model,
-      ...(baseUrl ? { openaiCompatBaseUrl: baseUrl } : {}),
-      ...(genSkipSsl ? { skipSslVerify: true } : {}),
-    },
+    generation,
     ...(embedding ? { embedding } : {}),
     createdAt: existing?.createdAt ?? new Date().toISOString(),
     lastRun: existing?.lastRun ?? null,
