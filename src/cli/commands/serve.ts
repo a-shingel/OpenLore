@@ -30,9 +30,10 @@ import { createRequire } from 'node:module';
 import { writeFile, readFile, unlink, mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
-import { OPENLORE_DIR } from '../../constants.js';
+import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../constants.js';
 import { dispatchTool, UnknownToolError } from '../../core/services/tool-dispatch.js';
-import { validateDirectory } from '../../core/services/mcp-handlers/utils.js';
+import { validateDirectory, waitForGraphRebuild } from '../../core/services/mcp-handlers/utils.js';
+import { EdgeStore } from '../../core/services/edge-store.js';
 import { McpWatcher } from '../../core/services/mcp-watcher.js';
 import { openloreAnalyze } from '../../api/analyze.js';
 import { TOOL_DEFINITIONS, TOOL_PRESETS, selectActiveTools } from './mcp.js';
@@ -218,6 +219,11 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   const startedAt = new Date().toISOString();
   const startMs = Date.now();
 
+  // Per-directory schema-reset flag. Set once (at startup or first request);
+  // cleared after waitForGraphRebuild() succeeds so subsequent requests don't
+  // re-open EdgeStore. Uses a Map because the daemon can serve multiple dirs.
+  const schemaResetByDir = new Map<string, boolean>();
+
   const server = createServer((req, res) => {
     void handleRequest(req, res).catch((err) => {
       sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
@@ -276,6 +282,34 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
         return;
       }
 
+      // Auto-heal schema mismatch: on first request for a directory, open
+      // EdgeStore once to detect wasReset; cache the result so we never
+      // re-open on subsequent requests. If reset, block until rebuild done.
+      if (!schemaResetByDir.has(directory)) {
+        try {
+          const analysisDir = join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+          if (EdgeStore.exists(analysisDir)) {
+            const es = EdgeStore.open(EdgeStore.dbPath(analysisDir));
+            schemaResetByDir.set(directory, es.wasReset);
+            es.close();
+          } else {
+            schemaResetByDir.set(directory, false);
+          }
+        } catch {
+          schemaResetByDir.set(directory, false);
+        }
+      }
+      if (schemaResetByDir.get(directory)) {
+        logger.debug(`[serve] Schema mismatch — waiting for graph rebuild before dispatching…`);
+        // waitForGraphRebuild polls readCachedContext until edgeStore is
+        // non-null. readCachedContext invalidates on llm-context.json mtime,
+        // which openloreAnalyze rewrites as its last step — so the poll sees
+        // the rebuilt state as soon as analyze completes.
+        const rebuilt = await waitForGraphRebuild(directory, 60_000);
+        schemaResetByDir.set(directory, !rebuilt);
+        if (!rebuilt) logger.warning(`[serve] Graph rebuild timed out — graph tools may return empty results.`);
+      }
+
       try {
         const result = await dispatchTool(name, args, directory);
         sendJson(res, 200, result ?? null);
@@ -314,6 +348,29 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
 
   logger.success(`openlore serve listening on http://${host}:${boundPort} (preset: ${presetName})`);
   logger.discovery(`Discovery file: ${serveFilePath(root)}`);
+
+  // Pre-populate the schema-reset flag for the served root so the startup
+  // warning fires immediately and the first request doesn't pay the open cost.
+  try {
+    const analysisDir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    if (EdgeStore.exists(analysisDir)) {
+      const es = EdgeStore.open(EdgeStore.dbPath(analysisDir));
+      const reset = es.wasReset;
+      es.close();
+      schemaResetByDir.set(root, reset);
+      if (reset) {
+        logger.warning(
+          `[serve] Schema version mismatch detected — graph index is being rebuilt in the background. ` +
+          `Graph-dependent tools will wait for completion on first request.`
+        );
+      }
+    } else {
+      schemaResetByDir.set(root, false);
+    }
+  } catch (err) {
+    logger.debug(`[serve] Failed to check schema on startup: ${err instanceof Error ? err.message : String(err)}`);
+    schemaResetByDir.set(root, false);
+  }
 
   // ── Freshness: watcher (signatures + vector) + debounced call-graph re-analyze ──
   // The watcher keeps signatures/vector fresh between commits and primes the read
@@ -357,10 +414,15 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   // Clean shutdown: drop the descriptor so clients don't reuse a dead port.
   // Signal handlers exit the process; the returned close() is for in-process
   // callers (tests) that must not kill the host.
+  // Store handler refs so teardown() can remove them — without this, every
+  // startServe() call (including each test) adds permanent process listeners
+  // that accumulate and trigger MaxListenersExceededWarning.
   let shuttingDown = false;
   const teardown = async (): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
+    process.off('SIGINT',  onSigInt);
+    process.off('SIGTERM', onSigTerm);
     if (reanalyzeTimer) clearTimeout(reanalyzeTimer);
     if (watcher) await watcher.stop().catch(() => {});
     await unlink(serveFilePath(root)).catch(() => {});
@@ -370,8 +432,10 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
     await teardown();
     process.exit(0);
   };
-  process.on('SIGINT', () => void exitAfterTeardown());
-  process.on('SIGTERM', () => void exitAfterTeardown());
+  const onSigInt  = () => void exitAfterTeardown();
+  const onSigTerm = () => void exitAfterTeardown();
+  process.on('SIGINT',  onSigInt);
+  process.on('SIGTERM', onSigTerm);
 
   return {
     port: boundPort,

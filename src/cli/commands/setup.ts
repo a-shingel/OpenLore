@@ -16,7 +16,7 @@
  */
 
 import { Command } from 'commander';
-import { readFile, writeFile, mkdir, access } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, access, unlink } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -229,14 +229,14 @@ function buildManifest(projectRoot: string, piGlobal = false): Record<ToolName, 
         dest: join(projectRoot, '.opencode', 'prompts', 'sisyphus-sdd.md'),
       },
     ],
-    // Pi (pi.dev) — a single TS extension, not per-skill markdown. Project-local
-    // by default; --global installs it for every project.
+    // Pi (pi.dev) — compiled JS extension from dist/pi/. Project-local by default;
+    // --global installs it for every project via ~/.pi/agent/extensions/.
     pi: [
       {
-        src: join(ex, 'pi', 'openlore.ts'),
+        src: join(PACKAGE_ROOT, 'dist', 'pi', 'extension.js'),
         dest: piGlobal
-          ? join(homedir(), '.pi', 'agent', 'extensions', 'openlore.ts')
-          : join(projectRoot, '.pi', 'extensions', 'openlore.ts'),
+          ? join(homedir(), '.pi', 'agent', 'extensions', 'openlore.js')
+          : join(projectRoot, '.pi', 'extensions', 'openlore.js'),
       },
     ],
   };
@@ -260,6 +260,13 @@ async function runSetup(
       if (!(await fileExists(entry.src))) {
         logger.warning(`setup: source not found — ${entry.src} (re-install openlore to fix)`);
         continue;
+      }
+      // Remove the old .ts counterpart when installing the .js Pi extension.
+      // Prior versions of setup distributed openlore.ts; Pi loads all files in the
+      // extensions dir, so both registering the same tools causes a conflict.
+      if (tool === 'pi' && entry.dest.endsWith('.js')) {
+        const oldTs = entry.dest.slice(0, -3) + '.ts';
+        if (await fileExists(oldTs)) await unlink(oldTs);
       }
       const status = await copyFile(entry.src, entry.dest, force);
       const rel = entry.dest.startsWith(projectRoot)
@@ -346,7 +353,7 @@ export const setupCommand = new Command('setup')
             checked: omoaDetected,
           },
           {
-            name: 'Pi            (.pi/extensions/openlore.ts — warm-daemon extension; --global for ~/.pi)',
+            name: 'Pi            (.pi/extensions/openlore.js — warm-daemon extension; --global for ~/.pi)',
             value: 'pi' as ToolName,
           },
         ],
