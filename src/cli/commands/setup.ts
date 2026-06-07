@@ -16,7 +16,7 @@
  */
 
 import { Command } from 'commander';
-import { readFile, writeFile, mkdir, access } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, access, unlink } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -260,6 +260,13 @@ async function runSetup(
       if (!(await fileExists(entry.src))) {
         logger.warning(`setup: source not found — ${entry.src} (re-install openlore to fix)`);
         continue;
+      }
+      // Remove the old .ts counterpart when installing the .js Pi extension.
+      // Prior versions of setup distributed openlore.ts; Pi loads all files in the
+      // extensions dir, so both registering the same tools causes a conflict.
+      if (tool === 'pi' && entry.dest.endsWith('.js')) {
+        const oldTs = entry.dest.slice(0, -3) + '.ts';
+        if (await fileExists(oldTs)) await unlink(oldTs);
       }
       const status = await copyFile(entry.src, entry.dest, force);
       const rel = entry.dest.startsWith(projectRoot)
