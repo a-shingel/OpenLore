@@ -604,3 +604,11 @@ export const WATCH_EMBED_FILE_CEILING = 5000;
  * churn) before a single coalesced refresh runs, so the whole op settles first.
  */
 export const WATCH_VCS_SETTLE_MS = 750;
+
+/**
+ * Max number of raw call edges a `conclusion`-class MCP tool may include as
+ * provenance before it is treated as a graph dump (the conclusion-over-graph
+ * tool contract — see `src/core/services/mcp-handlers/tool-contract.ts`).
+ * Tunable in one place so the bound stays consistent across the surface.
+ */
+export const MAX_PROVENANCE_EDGES = 25;

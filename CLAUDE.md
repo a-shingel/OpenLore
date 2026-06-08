@@ -21,6 +21,10 @@
 
 For all other cases (reading a file, grepping, listing files) use native tools directly.
 
+> **Authoring a new MCP tool?** Classify it `conclusion` or `explicit-topology` in
+> `src/core/services/mcp-handlers/tool-contract.ts` — `tool-contract.test.ts` fails until you do.
+> Conclusion tools must return the computed answer, not a graph for the agent to traverse.
+
 <!-- openlore-decisions-instructions -->
 ## Architectural decisions
 
