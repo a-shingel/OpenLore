@@ -7,10 +7,11 @@
 ## Purpose
 
 OpenLore ships an MCP (Model Context Protocol) server (`openlore mcp`, stdio transport,
-`@modelcontextprotocol/sdk`) that currently exposes ~45 tools across five handler modules
-(`graph`, `semantic`, `analysis`, `change`, `decisions`). The server is registered in
+`@modelcontextprotocol/sdk`) that currently exposes ~55 tools (and trending upward) across five
+handler modules (`graph`, `semantic`, `analysis`, `change`, `decisions`). The server is registered in
 `src/cli/commands/mcp.ts` (`startMcpServer`, `TOOL_DEFINITIONS`) with handlers under
-`src/core/services/mcp-handlers/`.
+`src/core/services/mcp-handlers/`. Because the total count grows over time, the quality lever is the
+*opt-in preset* surface, not the full registry (see "Tool Surface Size and Progressive Disclosure").
 
 This spec makes the server's quality requirements explicit so they can be verified and
 defended against regression. The goal is **genuine quality** — tools that an agent can
@@ -112,6 +113,22 @@ available opt-in. The existing `--minimal` mode (orient, search_code, record_dec
 detect_changes, check_spec_drift) is the baseline; the server SHALL document which set is
 appropriate for which use case and SHOULD make the lean set the default for first-time users.
 
+The *total* tool count trends upward over time (it has grown past ~50), which is precisely why
+the recommended surface is governed by **preset membership**, not by the total. A new tool SHALL
+default to opt-in: it joins `TOOL_PRESETS` only where it earns a clear trigger, and SHALL NOT be
+added to `MINIMAL_TOOLS` (or any future first-run-default preset) without an explicit justification
+that it belongs in the smallest useful surface. Specialized navigation/analysis tools (e.g.
+`get_map`, `get_landmarks`, `find_path`) belong in the opt-in `navigation` preset, not the lean
+default. The lean/first-run surface SHALL stay roughly constant in size as the full registry grows;
+growth of the *always-listed default* surface — not the full registry — is what this requirement
+constrains.
+
+#### Scenario: A new tool does not inflate the lean default
+- **GIVEN** a newly added tool that is not essential to a first-time user's first task
+- **WHEN** it is registered
+- **THEN** it is placed in an opt-in preset (e.g. `navigation`) and is absent from `MINIMAL_TOOLS`
+- **AND** the size of the minimal/first-run surface is unchanged by its addition
+
 #### Scenario: Lean default is available and documented
 - **GIVEN** a new user installing the server
 - **WHEN** they follow the documented quickstart
@@ -122,6 +139,71 @@ appropriate for which use case and SHOULD make the lean set the default for firs
 - **GIVEN** the full tool set is enabled
 - **WHEN** an agent searches for the tool matching a task
 - **THEN** overlapping or rarely-used tools are grouped or clearly differentiated so the agent's selection accuracy does not degrade
+
+### Requirement: Output Token Budgeting and Reversible Disclosure
+
+High-volume tool outputs SHALL be reducible to a caller-controlled token budget without
+information loss, by returning the smallest sufficient structural fact plus an *exact*
+expansion handle rather than the full payload. This is OpenLore's answer to lossy
+compression: do not shrink bytes, send fewer items and make every omitted or collapsed
+item recoverable by a single deterministic follow-up call. The reference implementation is
+`src/core/services/mcp-handlers/progressive.ts` (`applyTokenBudget`, `collapseExactDuplicates`,
+`expandHandle`, `omissionNote`), today wired into `orient` and `search_code`; this
+requirement generalizes that pattern to every tool whose result is an unbounded or
+importance-rankable list.
+
+A **high-volume tool** is any tool whose successful result is a list whose length scales
+with codebase size rather than being inherently bounded — e.g. `get_signatures`,
+`get_schema_inventory`, `get_route_inventory`, `get_env_vars`, `get_ui_components`,
+`get_middleware_inventory`, `find_dead_code`, `get_critical_hubs`, `get_god_functions`,
+`get_leaf_functions`, `get_duplicate_report`, `get_change_coupling`, `analyze_impact`, and
+`select_tests`. Such tools SHOULD accept an optional `tokenBudget` parameter and, when it is
+set, SHALL apply the disclosure contract below. Tools classified `explicit-topology`
+(`get_subgraph`, `get_call_graph`) are exempt because their value is the raw structure
+itself; they remain governed by the hard `MCP_TOOL_MAX_BYTES` backstop instead.
+
+The disclosure contract, when a `tokenBudget` is supplied:
+- Items SHALL be importance-ranked by the tool before truncation, and kept greedily until
+  the budget is exhausted; at least one item SHALL always be returned so a tiny budget still
+  yields a usable answer.
+- Dropping SHALL be reported, never silent: the result SHALL include an omission note stating
+  how many items were dropped and the exact follow-up that recovers them (a named tool call
+  or a raised budget), per `omissionNote`.
+- Every disclosable item SHALL carry an exact expansion handle (e.g. `name::filePath`) so a
+  caller can fetch the full detail with one deterministic call (e.g. `get_function_body`),
+  never a fuzzy re-search.
+- Exact duplicates (same identity triple) MAY be collapsed to one exemplar that lists the
+  other locations, so budget is spent on distinct facts rather than copies.
+- The reduction SHALL be deterministic: the same items and the same budget SHALL always
+  yield the same kept set and the same omission note (the char-based `estimateTokens` makes
+  this stable across runs and machines).
+
+A token budget is a *soft, agent-controlled* lever for context economy; `MCP_TOOL_MAX_BYTES`
+remains the *hard, unconditional* backstop that prevents any single result from overrunning
+the transport regardless of budget. The two SHALL coexist: setting a budget never disables
+the byte cap, and the byte cap never substitutes for graceful, handle-based disclosure.
+
+#### Scenario: Budgeted high-volume tool fits the budget and stays recoverable
+- **GIVEN** a high-volume tool invoked with a `tokenBudget` smaller than its full result
+- **WHEN** the tool executes
+- **THEN** it returns the highest-ranked items whose cumulative token cost is at or below the budget (always at least one item)
+- **AND** it includes an omission note giving the dropped count and the exact follow-up call or budget increase that recovers the rest
+- **AND** every returned item carries an exact expansion handle that resolves the full detail in one deterministic call
+
+#### Scenario: Reduction is deterministic
+- **GIVEN** the same high-volume result and the same `tokenBudget`
+- **WHEN** the tool is invoked twice
+- **THEN** the kept item set and the omission note are byte-identical across the two invocations
+
+#### Scenario: Unbudgeted call is unchanged
+- **GIVEN** a high-volume tool invoked without a `tokenBudget`
+- **WHEN** the tool executes
+- **THEN** it returns its full result (no items dropped or collapsed), bounded only by the hard `MCP_TOOL_MAX_BYTES` backstop
+
+#### Scenario: Byte backstop is independent of the budget
+- **GIVEN** any tool result, with or without a `tokenBudget`
+- **WHEN** the serialized result would exceed `MCP_TOOL_MAX_BYTES`
+- **THEN** the result is deterministically truncated to satisfy the byte cap regardless of the budget setting
 
 ### Requirement: Real-World Reliability and Graceful Degradation
 
@@ -322,6 +404,18 @@ extract the answer, and SHALL bound any included edge provenance to a small fixe
 - **Tension to manage:** description conciseness (token budget) vs. agent guidance ("USE THIS
   WHEN", preconditions). Resolve by leading with a tight summary, keeping triggers to one
   line, and moving long-form guidance to resources/README rather than deleting useful cues.
+- **Two token levers, deliberately distinct.** The *definition* budget (≤ 200 tokens of
+  description, paid every session) governs what an agent reads to choose a tool; the *output*
+  budget (the optional `tokenBudget` param, governed by the Output Token Budgeting requirement)
+  governs what an agent reads after calling one. They are independent: a lean description does
+  not imply a bounded result, and a budgeted result does not excuse a bloated description.
+- **Why reversible disclosure, not compression.** Byte-level compression of MCP payloads was
+  rejected (see `cli/spec.md` — server-side savings are ~2% and cost per-tool validation and
+  discoverability). The high-leverage move is sending *fewer items* with exact, deterministic
+  expansion handles, so omission is recoverable in one call rather than a fuzzy re-search. The
+  generic mechanism already exists in `progressive.ts`; the remaining work is wiring `tokenBudget`
+  through the high-volume list tools that do not yet accept it (today only `orient` and
+  `search_code` do).
 - **Trust is earned, not configured.** The external "Trust 50" is a no-data default; it rises
   only with real successful calls. The reliability, graceful-degradation, and smoke-validation
   requirements above are how OpenLore maximizes real-world success rate — the thing trust
