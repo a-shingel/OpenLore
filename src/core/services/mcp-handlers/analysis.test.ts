@@ -962,6 +962,29 @@ describe('handleGetMinimalContext', () => {
     const result = await handleGetMinimalContext(tmpDir, 'soloTarget') as { callers: Array<{ name: string }> };
     expect(result.callers.map(c => c.name)).toEqual(['onlyCaller']);
   });
+
+  it('flags a recursive function instead of listing it as its own caller/callee', async () => {
+    const fn = {
+      id: 'src/r.ts::walk', name: 'walk', filePath: `${tmpDir}/src/r.ts`,
+      signature: 'walk()', language: 'typescript',
+      fanIn: 1, fanOut: 1, startLine: 1, endLine: 5, isExternal: false, isTest: false,
+    };
+    readCachedContext.mockResolvedValue({
+      callGraph: makeCallGraph({
+        nodes: [fn],
+        edges: [
+          { callerId: 'src/r.ts::walk', calleeId: 'src/r.ts::walk', calleeName: 'walk', confidence: 'same_file', kind: 'calls' },
+        ],
+      }),
+    });
+    const { handleGetMinimalContext } = await import('./analysis.js');
+    const result = await handleGetMinimalContext(tmpDir, 'walk') as {
+      function: { recursive: boolean }; callers: Array<{ name: string }>; callees: Array<{ name: string }>;
+    };
+    expect(result.function.recursive).toBe(true);
+    expect(result.callers.map(c => c.name)).not.toContain('walk'); // not its own neighbour
+    expect(result.callees.map(c => c.name)).not.toContain('walk');
+  });
 });
 
 // ============================================================================

@@ -1013,6 +1013,11 @@ export async function handleGetMinimalContext(
     body = src.slice(target.startIndex, target.endIndex);
   } catch { /* source unavailable */ }
 
+  // Recursion: the target is intentionally excluded from its own caller/callee
+  // lists (it is not a neighbour of itself), so surface a self-call as a flag
+  // rather than losing the signal.
+  const recursive = callsEdges.some(e => e.callerId === target.id && e.calleeId === target.id);
+
   return {
     function: {
       name: target.name,
@@ -1025,6 +1030,7 @@ export async function handleGetMinimalContext(
       fanOut: target.fanOut,
       community: target.communityLabel ?? null,
       riskLevel,
+      recursive,
       body,
     },
     callers,
