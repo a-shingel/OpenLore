@@ -24,6 +24,7 @@ import { handleFindDeadCode } from './mcp-handlers/reachability.js';
 import { handleStructuralDiff } from './mcp-handlers/structural-diff.js';
 import { handleGetChangeCoupling } from './mcp-handlers/change-coupling.js';
 import { handleGetLandmarks } from './mcp-handlers/landmarks.js';
+import { handleGetMap } from './mcp-handlers/map.js';
 import { handleCheckArchitecture } from './mcp-handlers/architecture.js';
 import { handleGenerateChangeProposal, handleAnnotateStory } from './mcp-handlers/change.js';
 import {
@@ -266,6 +267,9 @@ export async function dispatchTool(
   } else if (name === 'get_landmarks') {
     const { directory, limit, label } = args as { directory: string; limit?: number; label?: string };
     return handleGetLandmarks(directory, { limit, label });
+  } else if (name === 'get_map') {
+    const { directory, communityId } = args as { directory: string; communityId?: string };
+    return handleGetMap(directory, communityId);
   } else if (name === 'detect_changes') {
     const { directory, base } = args as { directory: string; base?: string };
     return handleDetectChanges(directory, base);

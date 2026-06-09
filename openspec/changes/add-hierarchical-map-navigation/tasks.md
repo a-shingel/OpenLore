@@ -1,45 +1,42 @@
 # Tasks: add hierarchical map navigation
 
 ## 1. Aggregate communities into a super-graph
-- [ ] Add `src/core/analyzer/cluster-graph.ts` exporting
-      `buildClusterGraph(graph: SerializedCallGraph): ClusterGraph`, where a super-node is
-      `{ communityId, label, memberCount, fileCount, topFiles, topLandmark }` and a super-edge is
-      `{ fromCommunity, toCommunity, callCount }`.
-- [ ] Derive super-nodes from existing `communityId`/`communityLabel` on `FunctionNode`
-      (`call-graph.ts:68-101`); the label-propagation pass already populates these
-      (`call-graph.ts:2914-2969`). Do **not** re-cluster.
-- [ ] Build super-edges by grouping `CallEdge`s whose endpoints are in different communities and
-      counting per (fromCommunity, toCommunity). If `add-call-distance-scoping` has landed, also sum
-      inverse-distance as an optional coupling weight.
-      → verify: unit test on a fixture with two clusters asserts the super-edge count equals the
-      number of cross-cluster calls and self-edges are excluded.
-- [ ] Populate `topLandmark` from `add-structural-landmark-salience` if available, else fall back to
-      the highest-fan-in member (matching how `get_cluster` already names communities).
+- [x] Added `src/core/analyzer/cluster-graph.ts` exporting `buildClusterGraph(graph): ClusterGraph`,
+      where a super-node is `{ communityId, label, memberCount, fileCount, topFiles, topLandmark }`
+      and a super-edge is `{ fromCommunity, toCommunity, callCount }`.
+- [x] Super-nodes derive from the existing `communityId`/`communityLabel` on `FunctionNode` (the
+      label-propagation pass populates these). No re-clustering.
+- [x] Super-edges group `CallEdge`s whose endpoints are in different communities, counting distinct
+      cross-community calls per (from, to). External/test nodes excluded; self-edges excluded.
+      → verified: unit test on a two-cluster fixture asserts the super-edge count equals the number
+      of distinct cross-cluster calls and that no self-edge is emitted.
+- [x] `topLandmark` is the highest-fan-in member name (the `get_cluster` naming convention).
+      (Did NOT couple to add-structural-landmark-salience: labels carry no single "top" without a
+      composite score, which that change explicitly rejected.)
 
 ## 2. get_map tool — region view
-- [ ] Add `handleGetMap(directory, communityId?)` in a new
-      `src/core/services/mcp-handlers/map.ts`.
-      - No `communityId`: return the whole `ClusterGraph` (super-nodes + super-edges only). Bound the
-        super-node count; if a repo has very many communities, return the top-K by size with a
-        `truncated` flag and an explicit dropped-count (no silent capping).
-      - With `communityId`: delegate to the existing `get_cluster` drill-in
-        (`analysis.ts:1031-1097`) so the region-internal view reuses proven code.
-- [ ] Register in `TOOL_DEFINITIONS` (`mcp.ts:138+`) and the dispatch chain
-      (`tool-dispatch.ts:99-286`), using the `get_cluster` wiring (`mcp.ts:1232`,
-      `tool-dispatch.ts:262`) as the template.
-      → verify: invoking `get_map` with no args returns only super-nodes/super-edges; with a
-      `communityId` returns the same shape as `get_cluster`.
+- [x] Added `handleGetMap(directory, communityId?)` in `src/core/services/mcp-handlers/map.ts`.
+      - No `communityId`: returns the region super-graph only (super-nodes + super-edges, no function
+        bodies), bounded to the top-K regions by member count with a `truncated` count (no silent cap).
+      - With `communityId`: delegates to the shared `buildClusterView` extracted from
+        `handleGetCluster`, so the region-internal view reuses proven code.
+- [x] Registered in `TOOL_DEFINITIONS` and the dispatch chain, following the `get_cluster` wiring.
+      → verified: `get_map` with no args returns only regions/connections; with a `communityId`
+      returns the `get_cluster` shape. Live on the repo: 709 regions → top 40 (truncated 669), 39
+      connections, drill-in yields function granularity.
 
 ## 3. Contract classification
-- [ ] In the contract table from `enforce-conclusion-over-graph-tool-contract`, classify the
-      whole-repo `get_map` as `conclusion` (region-granularity navigation answer) and document that
-      its drill-in path inherits `get_cluster`'s class.
-      → verify: `tool-contract.test.ts` passes for `get_map`.
+- [x] Classified the whole-repo `get_map` as `conclusion` in the contract table (its super-edges are
+      resolved community labels, not id-reference raw topology; the drill-in inherits `get_cluster`'s
+      class). Added `get_map` to the `navigation` preset only (NOT `MINIMAL_TOOLS`); nav payload
+      ceiling consciously bumped 9_800 → 10_700 (spec-28).
+      → verified: `tool-contract.test.ts` completeness passes for `get_map`; `map.test.ts` runs
+      `assertConclusionShape` on the real region-view shape.
 
 ## 4. Spec + close the loop
-- [ ] Land the `specs/mcp-handlers/spec.md` delta in this change.
-- [ ] Run `vitest run src/core/analyzer/cluster-graph.test.ts src/core/services/mcp-handlers/map.test.ts`.
-- [ ] Update the MCP tool table in `CLAUDE.md` with a "lay of the land / where do regions connect?"
-      → `get_map` row.
-- [ ] `record_decision` titled "Two-tier hierarchical map navigation over communities" noting the
-      region→function granularity and the deliberate non-recursive scope.
+- [x] Landed the `CoarseToFineMapNavigation` requirement in a new `specs/mcp-handlers/spec.md` domain.
+- [x] Ran `vitest run src/core/analyzer/cluster-graph.test.ts src/core/services/mcp-handlers/map.test.ts`
+      → passing.
+- [x] Added a "lay of the land / where do regions connect?" → `get_map` row to the `CLAUDE.md` tool table.
+- [x] `record_decision` "Two-tier hierarchical map navigation over communities" recorded (id `c683d90d`)
+      noting region→function granularity and the deliberate non-recursive scope.

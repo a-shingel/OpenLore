@@ -1063,10 +1063,21 @@ export async function handleGetCluster(
   if (!target) return { error: `Function "${functionName}" not found.` };
   if (!target.communityId) return { error: `No community data. Re-run analyze_codebase.` };
 
-  // All nodes in same community
+  return buildClusterView(cg, absDir, target.communityId);
+}
+
+/**
+ * Function-granularity view of one community: members (by fan-in), spanning files,
+ * internal call edges, and density. Shared by `get_cluster` (which resolves a
+ * function name to its community) and `get_map`'s drill-in (which has the
+ * `communityId` directly), so both render a region identically.
+ */
+export function buildClusterView(cg: SerializedCallGraph, absDir: string, communityId: string): unknown {
+  // All nodes in the same community
   const members = cg.nodes
-    .filter(n => n.communityId === target.communityId && !n.isExternal && !n.isTest)
+    .filter(n => n.communityId === communityId && !n.isExternal && !n.isTest)
     .sort((a, b) => b.fanIn - a.fanIn);
+  if (members.length === 0) return { error: `No community "${communityId}" found.` };
 
   // Internal edges within community
   const memberIds = new Set(members.map(n => n.id));
@@ -1095,8 +1106,8 @@ export async function handleGetCluster(
   const files = [...new Set(members.map(n => relative(absDir, n.filePath)))].sort();
 
   return {
-    communityLabel: target.communityLabel,
-    communityId: target.communityId,
+    communityLabel: members[0].communityLabel,
+    communityId,
     stats: {
       members: m,
       files: files.length,

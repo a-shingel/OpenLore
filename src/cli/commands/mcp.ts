@@ -1263,6 +1263,23 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'get_map',
+    description:
+      'The lay of the land: a coarse-to-fine map of the call graph. With no communityId, returns the ' +
+      'REGION view — each code community as a super-node (label, size, top files, top landmark) plus ' +
+      'weighted inter-region connections, no function bodies — so you can see where regions connect ' +
+      'without reading any code. Pass a communityId to drill into one region at function granularity. ' +
+      'Run analyze_codebase first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        communityId: { type: 'string', description: 'Optional: drill into this region (a communityId from the region view) at function granularity' },
+      },
+      required: ['directory'],
+    },
+  },
+  {
     name: 'detect_changes',
     description:
       'Detect recently changed functions and rank them by blast radius. ' +
@@ -1451,7 +1468,7 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
   navigation: new Set([
     'orient', 'search_code', 'get_subgraph', 'trace_execution_path',
     'analyze_impact', 'suggest_insertion_points', 'get_function_skeleton',
-    'get_landmarks',
+    'get_landmarks', 'get_map',
   ]),
 };
 
