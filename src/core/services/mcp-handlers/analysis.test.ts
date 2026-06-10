@@ -16,6 +16,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
@@ -1075,6 +1076,50 @@ describe('handleDetectChanges', () => {
     // tmpDir is not a git repo — git diff will fail
     const result = await handleDetectChanges(tmpDir) as { error: string };
     expect(result.error).toMatch(/git diff failed/);
+  });
+
+  // Regression: call-graph nodes store repo-root-RELATIVE filePaths. The diff
+  // parser must key changed files by the same relative form, or no changed
+  // function ever matches a node (handler returns "no matching function nodes").
+  it('maps a real git diff to a node whose filePath is repo-relative', async () => {
+    const git = (...args: string[]) =>
+      spawnSync('git', args, { cwd: tmpDir, encoding: 'utf-8' });
+    git('init', '-q');
+    git('config', 'user.email', 'test@test.dev');
+    git('config', 'user.name', 'Test');
+
+    const srcDir = join(tmpDir, 'src');
+    await mkdir(srcDir, { recursive: true });
+    const file = join(srcDir, 'a.ts');
+    await writeFile(file, 'export function doWork(x: number): number {\n  const y = x + 1;\n  return y;\n}\n', 'utf-8');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'init');
+
+    // Modify a line inside the function body in the working tree.
+    await writeFile(file, 'export function doWork(x: number): number {\n  const y = x + 2;\n  return y;\n}\n', 'utf-8');
+
+    // Node uses a RELATIVE filePath — the production convention.
+    readCachedContext.mockResolvedValue({
+      callGraph: makeCallGraph({
+        nodes: [{
+          id: 'src/a.ts::doWork', name: 'doWork', filePath: 'src/a.ts',
+          signature: 'doWork(x: number): number', language: 'typescript',
+          fanIn: 3, fanOut: 0, startLine: 1, endLine: 4,
+          isExternal: false, isTest: false,
+        }],
+      }),
+    });
+
+    const { handleDetectChanges } = await import('./analysis.js');
+    const result = await handleDetectChanges(tmpDir) as {
+      changedFunctions: Array<{ name: string; file: string }>;
+      message?: string;
+    };
+
+    expect(result.message).toBeUndefined();
+    expect(result.changedFunctions).toHaveLength(1);
+    expect(result.changedFunctions[0].name).toBe('doWork');
+    expect(result.changedFunctions[0].file).toBe('src/a.ts');
   });
 });
 
