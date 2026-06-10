@@ -467,6 +467,33 @@ public class OrderService {
     expect(createNode?.className).toBe('OrderService');
   });
 
+  it('emits one edge per qualified call (no bare/qualified duplication)', async () => {
+    // Regression (#138): JAVA_CALL_QUERY matched a qualified `Money.of(...)` with
+    // BOTH the qualified and the bare pattern, emitting two edges (a `Money.of`
+    // external node AND a bare `of`). That doubled fan-out and let bare names
+    // falsely resolve to unrelated same-named methods.
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'Pay.java',
+      language: 'Java',
+      content: `
+public class Pay {
+    public Receipt process(Order o) {
+        Money m = Money.of(o.total());
+        return repo.save(m);
+    }
+}
+      `,
+    }]);
+
+    // No bare duplicates of the qualified callees.
+    const externalNames = Array.from(result.nodes.values()).filter(n => n.isExternal).map(n => n.name);
+    expect(externalNames).not.toContain('of');    // only `Money.of`
+    expect(externalNames).not.toContain('save');  // only `repo.save`
+    // process makes exactly three distinct outgoing calls: Money.of, o.total, repo.save.
+    expect(fanOut(result, 'process')).toBe(3);
+  });
+
   it('extracts constructors as nodes', async () => {
     const builder = new CallGraphBuilder();
     const result = await builder.build([{

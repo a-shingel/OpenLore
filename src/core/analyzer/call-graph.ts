@@ -1269,23 +1269,10 @@ async function extractRubyGraph(
     });
   }
 
-  const rawEdges: RawEdge[] = [];
-
-  // Explicit calls: fn(), obj.method()
-  for (const match of callQuery.matches(tree.rootNode)) {
-    const nameCapture = match.captures.find(c => c.name === 'call.name');
-    const nodeCapture = match.captures.find(c => c.name === 'call.node');
-    const objectCapture = match.captures.find(c => c.name === 'call.object');
-    if (!nameCapture || !nodeCapture) continue;
-
-    const calleeName = nameCapture.node.text;
-    if (isIgnoredCallee(calleeName)) continue;
-
-    const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
-    if (!caller) continue;
-
-    rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject: objectCapture?.node.text });
-  }
+  // Explicit calls: fn(), obj.method(). RUBY_CALL_QUERY has the same two-pattern
+  // overlap as Java (a bare `method:` pattern that also matches `receiver.method`),
+  // so dedupe per call site to avoid emitting both `obj.method` and a bare `method`.
+  const rawEdges = dedupeOverlappingCalls(callQuery, tree.rootNode, nodes);
 
   // Bareword calls: identifier at statement level, no parens
   for (const match of barewordQuery.matches(tree.rootNode)) {
@@ -1324,6 +1311,49 @@ const JAVA_CALL_QUERY = `
   (method_invocation
     name: (identifier) @call.name) @call.node
 `;
+
+/**
+ * Build raw call edges from a call query whose patterns overlap on the same
+ * invocation node — e.g. a qualified `object.name(...)` pattern plus a bare
+ * `name(...)` pattern where the bare one also matches qualified calls (Java,
+ * Ruby). Without deduplication each qualified call emits two edges (a qualified
+ * `Obj.name` and a bare `name`), doubling fan-out and inflating the external
+ * node set. We keep one edge per invocation node, preferring the match that
+ * carries the receiver (`@call.object`).
+ */
+function dedupeOverlappingCalls(
+  callQuery: Parser.Query,
+  root: Parser.SyntaxNode,
+  nodes: FunctionNode[]
+): RawEdge[] {
+  const callByNode = new Map<number, { calleeName: string; calleeObject?: string; node: Parser.SyntaxNode }>();
+  for (const match of callQuery.matches(root)) {
+    const nameCapture = match.captures.find(c => c.name === 'call.name');
+    const nodeCapture = match.captures.find(c => c.name === 'call.node');
+    const objectCapture = match.captures.find(c => c.name === 'call.object');
+    if (!nameCapture || !nodeCapture) continue;
+
+    const key = nodeCapture.node.startIndex;
+    const existing = callByNode.get(key);
+    // First match for this call site, or upgrade a bare match to the qualified one.
+    if (!existing || (objectCapture && !existing.calleeObject)) {
+      callByNode.set(key, {
+        calleeName: nameCapture.node.text,
+        calleeObject: objectCapture?.node.text,
+        node: nodeCapture.node,
+      });
+    }
+  }
+
+  const rawEdges: RawEdge[] = [];
+  for (const call of callByNode.values()) {
+    if (isIgnoredCallee(call.calleeName)) continue;
+    const caller = findEnclosingFunction(nodes, call.node.startIndex);
+    if (!caller) continue;
+    rawEdges.push({ callerId: caller.id, calleeName: call.calleeName, line: call.node.startPosition.row + 1, calleeObject: call.calleeObject });
+  }
+  return rawEdges;
+}
 
 async function extractJavaGraph(
   filePath: string,
@@ -1370,21 +1400,13 @@ async function extractJavaGraph(
     });
   }
 
-  const rawEdges: RawEdge[] = [];
-  for (const match of callQuery.matches(tree.rootNode)) {
-    const nameCapture = match.captures.find(c => c.name === 'call.name');
-    const nodeCapture = match.captures.find(c => c.name === 'call.node');
-    const objectCapture = match.captures.find(c => c.name === 'call.object');
-    if (!nameCapture || !nodeCapture) continue;
-
-    const calleeName = nameCapture.node.text;
-    if (isIgnoredCallee(calleeName)) continue;
-
-    const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
-    if (!caller) continue;
-
-    rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject: objectCapture?.node.text });
-  }
+  // JAVA_CALL_QUERY has two patterns: a qualified `object.name(...)` pattern and a
+  // bare `name(...)` pattern. A qualified invocation like `Money.of(...)` matches
+  // BOTH (the second pattern ignores the object field), which would emit two edges
+  // for one call site — a qualified `Money.of` AND a bare `of` — doubling fan-out
+  // and polluting the external-node set. Collapse to one edge per invocation node,
+  // preferring the qualified match (it carries the receiver).
+  const rawEdges = dedupeOverlappingCalls(callQuery, tree.rootNode, nodes);
 
   return { nodes, rawEdges };
 }
