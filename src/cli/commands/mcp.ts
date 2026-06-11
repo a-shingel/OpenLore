@@ -1492,7 +1492,7 @@ export function toolAnnotations(name: string): Record<string, unknown> {
 }
 
 const MINIMAL_TOOLS = new Set([
-  'orient', 'search_code', 'record_decision', 'detect_changes', 'check_spec_drift',
+  'orient', 'search_code', 'record_decision', 'detect_changes', 'check_spec_drift', 'get_health_map',
 ]);
 
 // Named tool presets (Spec 14). A small, navigation-focused surface keeps the

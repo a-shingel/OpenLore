@@ -33,9 +33,9 @@ describe('MCP tool presets', () => {
     }
   });
 
-  it('minimal preset keeps its 5-tool contract', () => {
+  it('minimal preset keeps its 6-tool contract', () => {
     const tools = selectActiveTools(TOOL_DEFINITIONS, { minimal: true }).map(t => t.name);
-    expect(new Set(tools)).toEqual(new Set(['orient', 'search_code', 'record_decision', 'detect_changes', 'check_spec_drift']));
+    expect(new Set(tools)).toEqual(new Set(['orient', 'search_code', 'record_decision', 'detect_changes', 'check_spec_drift', 'get_health_map']));
   });
 
   it('no selector exposes the full tool set', () => {
