@@ -430,6 +430,7 @@ let _javaParser: Parser | undefined;
 let _cppParser: Parser | undefined;
 let _swiftParser: Parser | undefined;
 let _phpParser: Parser | undefined;
+let _csParser: Parser | undefined;
 let _TsLanguage: object | undefined;
 let _PyLanguage: object | undefined;
 let _GoLanguage: object | undefined;
@@ -439,6 +440,7 @@ let _JavaLanguage: object | undefined;
 let _CppLanguage: object | undefined;
 let _SwiftLanguage: object | undefined;
 let _PhpLanguage: object | undefined;
+let _CsLanguage: object | undefined;
 
 async function getTSParser(): Promise<{ parser: Parser; lang: object }> {
   if (!_tsParser) {
@@ -508,6 +510,16 @@ async function getPhpParser(): Promise<{ parser: Parser; lang: object }> {
     (_phpParser as Parser).setLanguage(_PhpLanguage as unknown as Parser.Language);
   }
   return { parser: _phpParser!, lang: _PhpLanguage! };
+}
+
+async function getCSharpParser(): Promise<{ parser: Parser; lang: object }> {
+  if (!_csParser) {
+    const csModule = await import('tree-sitter-c-sharp');
+    _CsLanguage = csModule.default;
+    _csParser = new Parser();
+    (_csParser as Parser).setLanguage(_CsLanguage as unknown as Parser.Language);
+  }
+  return { parser: _csParser!, lang: _CsLanguage! };
 }
 
 async function getCppParser(): Promise<{ parser: Parser; lang: object }> {
@@ -2745,6 +2757,10 @@ const PHP_DISPATCH_METHODS = new Set(['dispatch', 'emit', 'fire', 'publish', 'br
 /** Single regex pre-filter so we only parse files that could contain a pattern. */
 const EVENT_PREFILTER = /\b(on|once|addListener|prependListener|prependOnceListener|addEventListener|subscribe|emit|dispatch|publish|dispatchEvent|instrument|broadcast|listen|fire|event)\s*\(/;
 
+/** Pre-filters for the type-based (Java/C#) rule: an annotation/interface or a dispatch verb. */
+const JAVA_TYPE_EVENT_PREFILTER = /@(?:Subscribe|EventListener|TransactionalEventListener|EventHandler)\b|\b(?:post|publishEvent|publish|fire|fireEvent|raise|send)\s*\(/;
+const CSHARP_TYPE_EVENT_PREFILTER = /\b(?:INotificationHandler|IRequestHandler|IConsumer|IEventHandler|IHandleMessages|IHandle)\b|\b(?:Publish|Send|Raise|RaiseEvent|Fire|Notify)\s*\(/;
+
 /** Resolve a referenced simple name to a single internal function node, or undefined
  *  when unknown or ambiguous (never guesses). Prefers a match in `preferFile`. */
 type HandlerResolver = (name: string, preferFile: string) => FunctionNode | undefined;
@@ -2870,7 +2886,7 @@ interface EventSites { registrations: EventRegistration[]; dispatches: EventDisp
  * pairing/fan-out/provenance stay identical across languages and adding a language
  * cannot change another's edges.
  */
-function pairAndEmitEventEdges(sites: EventSites, allNodes: Map<string, FunctionNode>): CallEdge[] {
+function pairAndEmitEventEdges(sites: EventSites, allNodes: Map<string, FunctionNode>, ruleName: string): CallEdge[] {
   if (sites.dispatches.length === 0) return [];
 
   const handlersByKey = new Map<string, Set<string>>();
@@ -2908,7 +2924,7 @@ function pairAndEmitEventEdges(sites: EventSites, allNodes: Map<string, Function
         confidence: 'synthesized',
         kind: 'calls',
         callType: 'direct',
-        synthesizedBy: 'event-channel',
+        synthesizedBy: ruleName,
       });
     }
   }
@@ -3152,6 +3168,114 @@ function collectPhpEventSites(
   }
 }
 
+// ── Type-based events (Java/C#): keyed on the event TYPE, not a string channel ──
+
+/** Java annotations that mark an event-handler method. */
+const JAVA_HANDLER_ANNOTATIONS = new Set(['Subscribe', 'EventListener', 'TransactionalEventListener', 'EventHandler']);
+/** Java dispatch verbs carrying a constructed event (Guava `post`, Spring `publishEvent`). */
+const JAVA_TYPE_DISPATCH_METHODS = new Set(['post', 'publishEvent', 'publish', 'fire', 'fireEvent', 'raise', 'send']);
+/** C# handler interfaces whose first type argument is the handled event type. */
+const CSHARP_HANDLER_INTERFACES = new Set(['INotificationHandler', 'IRequestHandler', 'IConsumer', 'IEventHandler', 'IHandleMessages', 'IHandle']);
+/** C# dispatch verbs carrying a constructed event (MediatR `Publish`/`Send`, aggregators `Publish`). */
+const CSHARP_TYPE_DISPATCH_METHODS = new Set(['Publish', 'Send', 'Raise', 'RaiseEvent', 'Fire', 'Notify']);
+
+/** Handler node-id for a declaration node (the call-graph node enclosing its name). */
+function handlerNodeIdAt(declNode: Parser.SyntaxNode, fileNodes: FunctionNode[]): string | undefined {
+  const pos = (declNode.childForFieldName('name') ?? declNode).startIndex;
+  return findEnclosingFunction(fileNodes, pos)?.id;
+}
+
+/** Collect Java type-based event sites (`@Subscribe`/`@EventListener` ↔ `post(new T())`). */
+function collectJavaTypeEventSites(
+  tree: Parser.Tree, fileNodes: FunctionNode[], _filePath: string, _resolveHandler: HandlerResolver, sites: EventSites,
+): void {
+  for (const method of tree.rootNode.descendantsOfType('method_declaration')) {
+    // `modifiers` is a child (not a named field) in tree-sitter-java; annotations live inside it.
+    const mods = method.namedChildren.find(c => c.type === 'modifiers');
+    if (!mods) continue;
+    const annotated = mods.namedChildren.some(
+      a => (a.type === 'marker_annotation' || a.type === 'annotation') &&
+        JAVA_HANDLER_ANNOTATIONS.has(a.childForFieldName('name')?.text ?? ''),
+    );
+    if (!annotated) continue;
+    const params = method.childForFieldName('parameters') ?? method.namedChildren.find(c => c.type === 'formal_parameters');
+    const firstParam = params?.namedChildren.find(c => c.type === 'formal_parameter');
+    const typeNode = firstParam?.childForFieldName('type');
+    if (typeNode?.type !== 'type_identifier') continue; // require a concrete type
+    const handlerId = handlerNodeIdAt(method, fileNodes);
+    if (handlerId) sites.registrations.push({ key: `type:${typeNode.text}`, handlerIds: [handlerId] });
+  }
+  for (const inv of tree.rootNode.descendantsOfType('method_invocation')) {
+    const name = inv.childForFieldName('name')?.text;
+    if (!name || !JAVA_TYPE_DISPATCH_METHODS.has(name)) continue;
+    const arg0 = inv.childForFieldName('arguments')?.namedChildren[0];
+    if (arg0?.type !== 'object_creation_expression') continue;
+    const t = arg0.childForFieldName('type')?.text;
+    if (!t) continue;
+    const caller = findEnclosingFunction(fileNodes, inv.startIndex);
+    if (caller) sites.dispatches.push({ key: `type:${t}`, callerId: caller.id, line: inv.startPosition.row + 1 });
+  }
+}
+
+/** C# invocation method name: `x.M()` (member access) or `M()` (identifier). */
+function csInvocationName(inv: Parser.SyntaxNode): string | undefined {
+  const fn = inv.childForFieldName('function');
+  if (!fn) return undefined;
+  if (fn.type === 'member_access_expression') return fn.childForFieldName('name')?.text;
+  if (fn.type === 'identifier') return fn.text;
+  return undefined;
+}
+
+/** First type argument of a handler interface in a C# class's base list, or undefined. */
+function csHandlerEventType(cls: Parser.SyntaxNode): string | undefined {
+  const bases = cls.childForFieldName('bases') ?? cls.namedChildren.find(c => c.type === 'base_list');
+  if (!bases) return undefined;
+  for (const g of bases.descendantsOfType('generic_name')) {
+    const base = g.namedChildren.find(c => c.type === 'identifier')?.text;
+    if (base && CSHARP_HANDLER_INTERFACES.has(base)) {
+      const arg = g.childForFieldName('type_arguments')?.namedChildren.find(c => c.type === 'identifier')
+        ?? g.namedChildren.find(c => c.type === 'type_argument_list')?.namedChildren.find(c => c.type === 'identifier');
+      if (arg) return arg.text;
+    }
+  }
+  return undefined;
+}
+
+/** First parameter type name of a C# method, or undefined. */
+function csFirstParamType(method: Parser.SyntaxNode): string | undefined {
+  const params = method.childForFieldName('parameters') ?? method.namedChildren.find(c => c.type === 'parameter_list');
+  const first = params?.namedChildren.find(c => c.type === 'parameter');
+  const t = first?.childForFieldName('type');
+  return t?.type === 'identifier' ? t.text : undefined;
+}
+
+/** Collect C# type-based event sites (`INotificationHandler<T>` ↔ `Publish(new T())`). */
+function collectCSharpTypeEventSites(
+  tree: Parser.Tree, fileNodes: FunctionNode[], _filePath: string, _resolveHandler: HandlerResolver, sites: EventSites,
+): void {
+  for (const cls of tree.rootNode.descendantsOfType('class_declaration')) {
+    const eventType = csHandlerEventType(cls);
+    if (!eventType) continue;
+    for (const method of cls.descendantsOfType('method_declaration')) {
+      if (csFirstParamType(method) !== eventType) continue;
+      const handlerId = handlerNodeIdAt(method, fileNodes);
+      if (handlerId) sites.registrations.push({ key: `type:${eventType}`, handlerIds: [handlerId] });
+    }
+  }
+  for (const inv of tree.rootNode.descendantsOfType('invocation_expression')) {
+    const name = csInvocationName(inv);
+    if (!name || !CSHARP_TYPE_DISPATCH_METHODS.has(name)) continue;
+    const arg0 = inv.childForFieldName('arguments')?.namedChildren[0]?.namedChildren?.[0]
+      ?? inv.childForFieldName('arguments')?.namedChildren[0];
+    const ctor = arg0?.type === 'object_creation_expression' ? arg0
+      : arg0?.descendantsOfType('object_creation_expression')[0];
+    const t = ctor?.childForFieldName('type')?.text;
+    if (!t) continue;
+    const caller = findEnclosingFunction(fileNodes, inv.startIndex);
+    if (caller) sites.dispatches.push({ key: `type:${t}`, callerId: caller.id, line: inv.startPosition.row + 1 });
+  }
+}
+
 /**
  * Event-channel rule: pair handler registrations (`on`/`once`/`addEventListener`/
  * `subscribe`/… with a static key) against dispatch sites (`emit`/`dispatch`/
@@ -3164,9 +3288,13 @@ function collectPhpEventSites(
  * Recovery is PER-LANGUAGE and added one language at a time: each language has its
  * own collector (its AST node types), but pairing/fan-out/provenance are shared, and
  * sites are paired only within their own language (no cross-language pairing). In
- * effect: JavaScript/TypeScript, Python, Ruby, and PHP. Languages whose event systems
- * are type-/annotation-/channel-based (Go, Java, C#, Rust, …) have no collector — the
- * pass emits nothing for them rather than guess.
+ * effect: JavaScript/TypeScript, Python, Ruby, and PHP for the string-key rule.
+ *
+ * Java and C# use a TYPE-based rule (`synthesizedBy: 'type-event'`) instead: the key
+ * is the event type — an annotated/typed handler (`@Subscribe`/`@EventListener`,
+ * `INotificationHandler<T>`) paired with a constructed dispatch (`post(new T())`,
+ * `Publish(new T())`). Channel-based languages with no statically-pairable idiom (Go,
+ * Rust, …) have no collector — the pass emits nothing rather than guess.
  */
 async function synthesizeEventChannelEdges(
   files: Array<{ path: string; content: string; language: string }>,
@@ -3190,7 +3318,7 @@ async function synthesizeEventChannelEdges(
       try { collectTsEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
       catch { /* skip unparseable file */ }
     }
-    edges.push(...pairAndEmitEventEdges(sites, allNodes));
+    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
   }
 
   const pyFiles = files.filter(f => f.language === 'Python' && EVENT_PREFILTER.test(f.content));
@@ -3201,7 +3329,7 @@ async function synthesizeEventChannelEdges(
       try { collectPyEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
       catch { /* skip unparseable file */ }
     }
-    edges.push(...pairAndEmitEventEdges(sites, allNodes));
+    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
   }
 
   const rubyFiles = files.filter(f => f.language === 'Ruby' && EVENT_PREFILTER.test(f.content));
@@ -3212,7 +3340,7 @@ async function synthesizeEventChannelEdges(
       try { collectRubyEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
       catch { /* skip unparseable file */ }
     }
-    edges.push(...pairAndEmitEventEdges(sites, allNodes));
+    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
   }
 
   const phpFiles = files.filter(f => f.language === 'PHP' && EVENT_PREFILTER.test(f.content));
@@ -3223,7 +3351,30 @@ async function synthesizeEventChannelEdges(
       try { collectPhpEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
       catch { /* skip unparseable file */ }
     }
-    edges.push(...pairAndEmitEventEdges(sites, allNodes));
+    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
+  }
+
+  // ── Type-based events (keyed on the event TYPE, not a string channel) ──
+  const javaFiles = files.filter(f => f.language === 'Java' && JAVA_TYPE_EVENT_PREFILTER.test(f.content));
+  if (javaFiles.length > 0) {
+    const { parser } = await getJavaParser();
+    const sites: EventSites = { registrations: [], dispatches: [] };
+    for (const file of javaFiles) {
+      try { collectJavaTypeEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+      catch { /* skip unparseable file */ }
+    }
+    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'type-event'));
+  }
+
+  const csFiles = files.filter(f => f.language === 'C#' && CSHARP_TYPE_EVENT_PREFILTER.test(f.content));
+  if (csFiles.length > 0) {
+    const { parser } = await getCSharpParser();
+    const sites: EventSites = { registrations: [], dispatches: [] };
+    for (const file of csFiles) {
+      try { collectCSharpTypeEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+      catch { /* skip unparseable file */ }
+    }
+    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'type-event'));
   }
 
   return edges;

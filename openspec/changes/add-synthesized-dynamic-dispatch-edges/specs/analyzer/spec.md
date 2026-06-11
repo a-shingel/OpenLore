@@ -85,6 +85,43 @@ reference, or an inline function/lambda (wired to the internal functions its bod
 - **THEN** the JavaScript/TypeScript synthesized edges are identical to those produced when no Python
   source is present, and the Python edges are added independently
 
+### Requirement: TypeBasedEventSynthesis
+
+The system SHALL recover **type-based** event edges in languages whose event systems key on an event
+**type** rather than a string channel: a handler is registered by an annotation or a typed interface,
+and a dispatch carries a constructed event instance. An edge SHALL be emitted from a dispatch site to
+a handler when the handler's event type and the dispatched event's constructed type match, derived
+statically from the AST with no LLM. The key is the event type name; pairing, the fan-out cap, and
+provenance are shared with the string-key rule, but the producing rule is labeled distinctly
+(`synthesizedBy: 'type-event'`). Type-based recovery is per-language and added one language at a time;
+in effect it covers **Java** (Guava `@Subscribe` / Spring `@EventListener` handler methods paired with
+`post(new T(...))` / `publishEvent(new T(...))`) and **C#** (a class implementing a handler interface
+such as `INotificationHandler<T>` / `IRequestHandler<T>` paired with `Publish(new T(...))` /
+`Send(new T(...))`). A dispatch whose argument is not a statically-typed construction SHALL emit no
+edge rather than guess.
+
+#### Scenario: Java annotated handler is reachable from its publisher
+
+- **GIVEN** a method annotated `@Subscribe` (or `@EventListener`) whose first parameter type is `T`,
+  and a separate site calling `post(new T(...))` (or `publishEvent(new T(...))`)
+- **WHEN** the call graph is built
+- **THEN** a synthesized `type-event` edge exists from the dispatch site's enclosing method to the
+  annotated handler method
+
+#### Scenario: C# typed handler is reachable from its publisher
+
+- **GIVEN** a class implementing `INotificationHandler<T>` whose handler method takes `T`, and a
+  separate site calling `Publish(new T(...))` (or `Send(new T(...))`)
+- **WHEN** the call graph is built
+- **THEN** a synthesized `type-event` edge exists from the dispatch site's enclosing method to the
+  handler method
+
+#### Scenario: Mismatched event types produce no edge
+
+- **GIVEN** a handler for type `A` and a dispatch constructing type `B`
+- **WHEN** the call graph is built
+- **THEN** no synthesized edge is created between them
+
 ### Requirement: EdgeProvenanceLabeling
 
 The system SHALL label every synthesized edge with a provenance distinct from directly-resolved

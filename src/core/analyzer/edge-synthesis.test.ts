@@ -476,6 +476,108 @@ describe('event-channel synthesis — PHP', () => {
   });
 });
 
+describe('type-based event synthesis — Java', () => {
+  const buildJava = (content: string): Promise<Built> =>
+    new CallGraphBuilder().build([{ path: 'App.java', content, language: 'Java' }]);
+
+  it('@Subscribe handler is reachable from post(new T())', async () => {
+    const b = await buildJava([
+      'class Listeners {',
+      '  @Subscribe',
+      '  public void onUserCreated(UserCreatedEvent e) { doWork(); }',
+      '}',
+      'class Publisher {',
+      '  void go(EventBus bus) { bus.post(new UserCreatedEvent("a")); }',
+      '}',
+    ].join('\n'));
+    const edge = edgeBetween(b, 'go', 'onUserCreated');
+    expect(edge?.confidence).toBe('synthesized');
+    expect(edge?.synthesizedBy).toBe('type-event');
+  });
+
+  it('@EventListener handler is reachable from publishEvent(new T())', async () => {
+    const b = await buildJava([
+      'class Listeners {',
+      '  @EventListener',
+      '  void handle(OrderPlaced ev) { ship(); }',
+      '}',
+      'class Pub {',
+      '  void go(ApplicationEventPublisher p) { p.publishEvent(new OrderPlaced()); }',
+      '}',
+    ].join('\n'));
+    expect(edgeBetween(b, 'go', 'handle')?.synthesizedBy).toBe('type-event');
+  });
+
+  it('Java mismatched event types produce no edge', async () => {
+    const b = await buildJava([
+      'class Listeners {',
+      '  @Subscribe',
+      '  void onA(EventA e) { work(); }',
+      '}',
+      'class Publisher {',
+      '  void go(EventBus bus) { bus.post(new EventB()); }',
+      '}',
+    ].join('\n'));
+    expect(edgeBetween(b, 'go', 'onA')).toBeUndefined();
+    expect(synthEdges(b)).toHaveLength(0);
+  });
+
+  it('an un-annotated method with the event type is NOT a handler', async () => {
+    const b = await buildJava([
+      'class Listeners {',
+      '  void onUserCreated(UserCreatedEvent e) { doWork(); }', // no @Subscribe
+      '}',
+      'class Publisher {',
+      '  void go(EventBus bus) { bus.post(new UserCreatedEvent()); }',
+      '}',
+    ].join('\n'));
+    expect(synthEdges(b)).toHaveLength(0);
+  });
+});
+
+describe('type-based event synthesis — C#', () => {
+  const buildCs = (content: string): Promise<Built> =>
+    new CallGraphBuilder().build([{ path: 'App.cs', content, language: 'C#' }]);
+
+  it('INotificationHandler<T> handler is reachable from Publish(new T())', async () => {
+    const b = await buildCs([
+      'public class UserCreatedHandler : INotificationHandler<UserCreatedEvent> {',
+      '  public Task Handle(UserCreatedEvent n, CancellationToken c) { DoWork(); return Task.CompletedTask; }',
+      '}',
+      'public class Publisher {',
+      '  void Go(IMediator mediator) { mediator.Publish(new UserCreatedEvent("a")); }',
+      '}',
+    ].join('\n'));
+    const edge = edgeBetween(b, 'Go', 'Handle');
+    expect(edge?.confidence).toBe('synthesized');
+    expect(edge?.synthesizedBy).toBe('type-event');
+  });
+
+  it('IRequestHandler<T> + Send(new T())', async () => {
+    const b = await buildCs([
+      'public class CreateOrderHandler : IRequestHandler<CreateOrder, Unit> {',
+      '  public Task<Unit> Handle(CreateOrder request, CancellationToken c) { Save(); return Unit.Task; }',
+      '}',
+      'public class Caller {',
+      '  void Go(IMediator m) { m.Send(new CreateOrder()); }',
+      '}',
+    ].join('\n'));
+    expect(edgeBetween(b, 'Go', 'Handle')?.synthesizedBy).toBe('type-event');
+  });
+
+  it('C# mismatched event types produce no edge', async () => {
+    const b = await buildCs([
+      'public class AHandler : INotificationHandler<EventA> {',
+      '  public Task Handle(EventA n, CancellationToken c) { Work(); return Task.CompletedTask; }',
+      '}',
+      'public class Publisher {',
+      '  void Go(IMediator m) { m.Publish(new EventB()); }',
+      '}',
+    ].join('\n'));
+    expect(synthEdges(b)).toHaveLength(0);
+  });
+});
+
 describe('event-channel synthesis — per-language isolation', () => {
   it('does not pair a Python registration with a JS/TS dispatch on the same key', async () => {
     const b = await new CallGraphBuilder().build([

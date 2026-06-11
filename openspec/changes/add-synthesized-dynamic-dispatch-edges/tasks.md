@@ -67,9 +67,17 @@ step 1 (it extends a core data structure — `EdgeConfidence` / `CallEdge`).
 > `&proc`, and bareword-call handlers; pyee-style `on`/`emit` and ActiveSupport::Notifications
 > `subscribe`/`instrument`), **PHP** (Laravel `Event::listen`/`event()`, Symfony `addListener`/
 > `dispatch`; handler = `'fn'` string callable, `[$this, 'method']` array callable, or a closure).
-> Symbol keys and string keys are namespaced so `:mount` never pairs with `'mount'`. Languages whose
-> event systems are type-/annotation-/channel-based (Go, Java, C#, Rust, Kotlin, Elixir process-based
-> PubSub, …) intentionally have NO collector — the pass emits nothing for them rather than guess.
+> Symbol keys and string keys are namespaced so `:mount` never pairs with `'mount'`.
+>
+> **Type-based events (spec: `TypeBasedEventSynthesis`; `synthesizedBy: 'type-event'`):** Java and C#
+> key on the event TYPE, not a string. A second rule (shared pairing core, distinct label) recovers:
+> **Java** — `@Subscribe`/`@EventListener`/`@TransactionalEventListener` handler methods (first
+> parameter type = the event) paired with `post(new T(...))` / `publishEvent(new T(...))`; **C#** — a
+> class implementing `INotificationHandler<T>` / `IRequestHandler<T>` / `IConsumer<T>` (the method
+> taking `T` is the handler) paired with `Publish(new T(...))` / `Send(new T(...))`. The key is
+> `type:T`; a dispatch whose argument is not a `new T(...)` construction emits nothing. Channel-based
+> languages with no statically-pairable idiom (Go, Rust, Elixir process-based PubSub, …) still have NO
+> collector — the pass emits nothing rather than guess.
 
 ## 1. Provenance on the edge model
 - [ ] Add `'synthesized'` to `EdgeConfidence` (`call-graph.ts:30`) and `synthesizedBy?: string` to
