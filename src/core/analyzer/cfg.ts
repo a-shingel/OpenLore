@@ -95,6 +95,16 @@ interface CfgLangSpec {
   ifTypes: Set<string>;
   /** Loop node types (while/for/range). */
   loopTypes: Set<string>;
+  /** `try`/`catch`/`finally` node type (exception branch). */
+  tryTypes: Set<string>;
+  /** `switch`/`match` node type (multi-way branch). */
+  switchTypes: Set<string>;
+  /** Nested function/closure node types — not descended into as outer CFG; their
+   *  free-variable reads become `may` (closure-capture) uses of the outer scope. */
+  nestedFnTypes: Set<string>;
+  /** True for C-style switch where a case without `break` falls into the next
+   *  (TS/JS); false where each case auto-breaks (Go switch, Python match). */
+  switchFallsThrough: boolean;
   /** Early-exit statement node types. */
   returnTypes: Set<string>;
   breakTypes: Set<string>;
@@ -135,6 +145,10 @@ interface CfgLangSpec {
 const TS_SPEC: CfgLangSpec = {
   ifTypes: new Set(['if_statement']),
   loopTypes: new Set(['while_statement', 'for_statement', 'for_in_statement', 'do_statement']),
+  tryTypes: new Set(['try_statement']),
+  switchTypes: new Set(['switch_statement']),
+  nestedFnTypes: new Set(['arrow_function', 'function_expression', 'function_declaration', 'generator_function', 'generator_function_declaration', 'method_definition']),
+  switchFallsThrough: true,
   returnTypes: new Set(['return_statement']),
   breakTypes: new Set(['break_statement']),
   continueTypes: new Set(['continue_statement']),
@@ -160,6 +174,10 @@ const TS_SPEC: CfgLangSpec = {
 const PY_SPEC: CfgLangSpec = {
   ifTypes: new Set(['if_statement']),
   loopTypes: new Set(['while_statement', 'for_statement']),
+  tryTypes: new Set(['try_statement']),
+  switchTypes: new Set(['match_statement']),
+  nestedFnTypes: new Set(['lambda', 'function_definition']),
+  switchFallsThrough: false,
   returnTypes: new Set(['return_statement']),
   breakTypes: new Set(['break_statement']),
   continueTypes: new Set(['continue_statement']),
@@ -185,6 +203,10 @@ const PY_SPEC: CfgLangSpec = {
 const GO_SPEC: CfgLangSpec = {
   ifTypes: new Set(['if_statement']),
   loopTypes: new Set(['for_statement']),
+  tryTypes: new Set([]),
+  switchTypes: new Set(['expression_switch_statement', 'type_switch_statement']),
+  nestedFnTypes: new Set(['func_literal', 'function_declaration', 'method_declaration']),
+  switchFallsThrough: false,
   returnTypes: new Set(['return_statement']),
   breakTypes: new Set(['break_statement']),
   continueTypes: new Set(['continue_statement']),
@@ -299,6 +321,16 @@ class CfgBuilder {
 
     if (spec.ifTypes.has(t)) return this.processIf(stmt, current, loop);
     if (spec.loopTypes.has(t)) return this.processLoop(stmt, current, loop);
+    if (spec.tryTypes.has(t)) return this.processTry(stmt, current, loop);
+    if (spec.switchTypes.has(t)) return this.processSwitch(stmt, current, loop);
+
+    // A nested function/closure declared as a statement: its body is a separate
+    // scope, not part of this CFG. Record only its free-variable (closure) reads
+    // as `may` captures of the enclosing scope.
+    if (spec.nestedFnTypes.has(t)) {
+      this.recordClosureCaptures(stmt, current);
+      return current;
+    }
 
     if (spec.returnTypes.has(t) || spec.throwTypes.has(t)) {
       this.recordExpr(stmt, current); // return/throw value is a use
@@ -380,6 +412,145 @@ class CfgBuilder {
     if (bodyExit !== null) this.addEdge(bodyExit, condBlock, 'back');
 
     return afterBlock;
+  }
+
+  /**
+   * try / catch / finally. The catch body is modeled as an alternative path from
+   * the same predecessor (an exception may occur anywhere in the try), so try-body
+   * and catch-body definitions do NOT linearly kill each other — they both reach
+   * the join. A `finally` runs on every path, so it is processed from the merge.
+   */
+  private processTry(stmt: CfgNode, current: number, loop: LoopCtx | null): number | null {
+    const { spec } = this;
+    this.setKind(current, 'branch');
+
+    const tryBody = stmt.childForFieldName(spec.bodyField) ?? stmt.namedChildren.find(c => spec.blockTypes.has(c.type));
+    const tryBlock = this.newBlock('normal');
+    this.addEdge(current, tryBlock, 'true');
+    const tryExit = tryBody ? this.processSeq(this.stmtChildren(tryBody), tryBlock, loop) : tryBlock;
+
+    const merge = this.newBlock('merge');
+    if (tryExit !== null) this.addEdge(tryExit, merge, 'normal');
+
+    // Each catch/except clause is an alternative path from `current`.
+    let sawCatch = false;
+    for (const clause of stmt.namedChildren) {
+      if (clause.type !== 'catch_clause' && clause.type !== 'except_clause') continue;
+      sawCatch = true;
+      const catchBlock = this.newBlock('normal');
+      this.addEdge(current, catchBlock, 'false');
+      // The bound exception variable is a definition (TS `catch (e)`, Py `except X as e`).
+      const param = clause.childForFieldName('parameter');
+      if (param && spec.identTypes.has(param.type)) {
+        this.block(catchBlock).ops.push({ op: 'def', variable: param.text, line: param.startPosition.row + 1, precision: 'exact' });
+      } else {
+        const asName = clause.namedChildren.find(c => spec.identTypes.has(c.type));
+        if (asName) this.block(catchBlock).ops.push({ op: 'def', variable: asName.text, line: asName.startPosition.row + 1, precision: 'may' });
+      }
+      const catchBody = clause.childForFieldName(spec.bodyField) ?? clause.namedChildren.find(c => spec.blockTypes.has(c.type));
+      const catchExit = catchBody ? this.processSeq(this.stmtChildren(catchBody), catchBlock, loop) : catchBlock;
+      if (catchExit !== null) this.addEdge(catchExit, merge, 'normal');
+    }
+    // No catch (try/finally only): the try body may still throw past the merge,
+    // but the non-exceptional path reaches it — keep `current`→merge as that edge.
+    if (!sawCatch) this.addEdge(current, merge, 'false');
+
+    // finally runs on every path → process it sequentially from the join.
+    const finallyClause = stmt.namedChildren.find(c => c.type === 'finally_clause');
+    if (finallyClause) {
+      const finBody = finallyClause.childForFieldName(spec.bodyField) ?? finallyClause.namedChildren.find(c => spec.blockTypes.has(c.type));
+      const finExit = finBody ? this.processSeq(this.stmtChildren(finBody), merge, loop) : merge;
+      return finExit;
+    }
+    return merge;
+  }
+
+  /**
+   * switch / match. Each case body is an alternative path from the discriminant
+   * block; cases that do not break/return fall through to the next case (sound
+   * for reaching-definitions). `break` exits to the post-switch merge; `continue`
+   * still targets an enclosing loop.
+   */
+  private processSwitch(stmt: CfgNode, current: number, loop: LoopCtx | null): number | null {
+    const { spec } = this;
+    this.setKind(current, 'branch');
+    const value = stmt.childForFieldName('value') ?? stmt.childForFieldName('condition');
+    if (value) this.recordUses(value, current);
+
+    // The case clauses live under a `*_body` node (TS switch_body) or, in Go,
+    // are direct children of the switch statement itself.
+    const body = stmt.childForFieldName(spec.bodyField) ?? stmt.namedChildren.find(c => c.type.endsWith('_body'));
+    const caseContainer = body ?? stmt;
+    const merge = this.newBlock('merge');
+    const caseCtx: LoopCtx = { breakTarget: merge, continueTarget: loop?.continueTarget ?? merge };
+
+    const isCaseNode = (ty: string): boolean =>
+      ty === 'switch_case' || ty === 'switch_default' ||      // TS
+      ty === 'case_clause' || ty === 'case_block' ||           // Py match (case_clause)
+      ty === 'expression_case' || ty === 'default_case' || ty === 'type_case'; // Go
+    const cases = caseContainer.namedChildren.filter(c => isCaseNode(c.type));
+    let sawDefault = false;
+    let prevFallthrough: number | null = null;
+    for (const cs of cases) {
+      const isDefault = cs.type.includes('default');
+      if (isDefault) sawDefault = true;
+      const caseBlock = this.newBlock('normal');
+      this.addEdge(current, caseBlock, isDefault ? 'false' : 'true');
+      // C-style fall-through: a previous case that did not break/return flows in.
+      if (spec.switchFallsThrough && prevFallthrough !== null) this.addEdge(prevFallthrough, caseBlock, 'normal');
+      // The case label expression(s) are uses of the discriminant context.
+      const caseValue = cs.childForFieldName('value');
+      if (caseValue) this.recordUses(caseValue, current);
+      // Statements = the clause's children minus its label value.
+      const stmts = cs.namedChildren.filter(c => c !== caseValue);
+      const caseExit = this.processSeq(stmts, caseBlock, caseCtx);
+      if (spec.switchFallsThrough) {
+        prevFallthrough = caseExit;
+      } else if (caseExit !== null) {
+        // Each case auto-breaks (Go/Python): its tail goes straight to the merge.
+        this.addEdge(caseExit, merge, 'normal');
+      }
+    }
+    if (spec.switchFallsThrough && prevFallthrough !== null) this.addEdge(prevFallthrough, merge, 'normal');
+    // No default: the discriminant can match nothing and skip to the merge.
+    if (!sawDefault) this.addEdge(current, merge, 'false');
+    return merge;
+  }
+
+  /**
+   * Record the free-variable reads of a nested function/closure as `may`
+   * (closure-capture) uses of the enclosing scope. Names bound by the nested
+   * function (its parameters) are excluded; an outer definition of any remaining
+   * name forms a conservative `may` dependence. The nested body's own defs are
+   * deliberately NOT recorded — they belong to a different scope.
+   */
+  private recordClosureCaptures(fnNode: CfgNode, block: number): void {
+    const { spec } = this;
+    const bound = new Set<string>(extractParamNames(fnNode, spec));
+    const body = findBody(fnNode, spec);
+    if (!body) return;
+    const seen = new Set<string>();
+    const visit = (n: CfgNode): void => {
+      // Do not descend into a further-nested function — that is yet another scope.
+      if (n !== fnNode && spec.nestedFnTypes.has(n.type)) { this.recordClosureCaptures(n, block); return; }
+      if (spec.callTypes.has(n.type)) {
+        const fn = n.childForFieldName('function') ?? n.namedChildren[0];
+        for (const c of n.namedChildren) { if (c === fn && fn && spec.identTypes.has(fn.type)) continue; visit(c); }
+        return;
+      }
+      if (spec.identTypes.has(n.type)) {
+        if (!bound.has(n.text)) {
+          const key = `${n.text}|${n.startPosition.row + 1}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            this.block(block).ops.push({ op: 'use', variable: n.text, line: n.startPosition.row + 1, precision: 'may' });
+          }
+        }
+        return;
+      }
+      for (const c of n.namedChildren) visit(c);
+    };
+    visit(body);
   }
 
   // ── Statement / expression def-use extraction ─────────────────────────────
@@ -503,6 +674,12 @@ class CfgBuilder {
     const { spec } = this;
     const visit = (n: CfgNode): void => {
       const t = n.type;
+      // A nested function/closure (callback, IIFE): its body is a separate scope.
+      // Record its free-variable reads as `may` captures, do not descend further.
+      if (spec.nestedFnTypes.has(t)) {
+        this.recordClosureCaptures(n, block);
+        return;
+      }
       // Nested assignment/declaration inside an expression: handle as a statement.
       if (spec.assignTypes.has(t) || spec.augAssignTypes.has(t)) {
         this.recordAssignment(n, block, spec.augAssignTypes.has(t));

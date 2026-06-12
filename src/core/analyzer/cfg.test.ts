@@ -168,6 +168,51 @@ describe('reaching definitions (def-use)', () => {
   });
 });
 
+// ─── exception / multi-way control flow (alternative paths must not kill) ─────
+
+describe('try/catch and switch (alternative-path soundness)', () => {
+  it('try and catch defs both reach a later use (no spurious kill)', async () => {
+    const lang = await tsLang();
+    const src = `function f(a:number){\n  let x = 0;\n  try {\n    x = risky(a);\n  } catch (e) {\n    x = -1;\n  }\n  return x;\n}`;
+    const cfg = cfgFor(src, lang, 'TypeScript', TS_FN);
+    expect(cfg.blocks.some(b => b.kind === 'branch')).toBe(true);
+    const defLines = new Set(cfg.defUse.filter(e => e.variable === 'x' && e.useLine === 8).map(e => e.defLine));
+    expect(defLines.has(4)).toBe(true); // try body value reaches the return
+    expect(defLines.has(6)).toBe(true); // catch body value reaches the return
+  });
+
+  it('switch case and default defs both reach a later use', async () => {
+    const lang = await tsLang();
+    const src = `function f(a:number){\n  let x = 0;\n  switch (a) {\n    case 1: x = 10; break;\n    default: x = 20;\n  }\n  return x;\n}`;
+    const cfg = cfgFor(src, lang, 'TypeScript', TS_FN);
+    expect(cfg.blocks.some(b => b.kind === 'branch')).toBe(true);
+    const defLines = new Set(cfg.defUse.filter(e => e.variable === 'x' && e.useLine === 7).map(e => e.defLine));
+    expect(defLines.has(4)).toBe(true); // case 1
+    expect(defLines.has(5)).toBe(true); // default
+  });
+});
+
+// ─── closures: captured outer variables are `may`, nested scope does not leak ──
+
+describe('closure captures are conservative (may)', () => {
+  it('a variable captured by a nested arrow is a may dependence', async () => {
+    const lang = await tsLang();
+    const src = `function f(a:number){\n  const base = a + 1;\n  const fn = (y:number) => base + y;\n  return fn(2);\n}`;
+    const cfg = cfgFor(src, lang, 'TypeScript', TS_FN);
+    const cap = cfg.defUse.find(e => e.variable === 'base' && e.useLine === 3);
+    expect(cap?.precision).toBe('may');
+  });
+
+  it('a callback captures the outer var as may and does not leak its own param', async () => {
+    const lang = await tsLang();
+    const src = `function f(items:number[]){\n  const k = 3;\n  return items.map(x => x * k);\n}`;
+    const cfg = cfgFor(src, lang, 'TypeScript', TS_FN);
+    expect(cfg.defUse.find(e => e.variable === 'k')?.precision).toBe('may');
+    // The arrow's own parameter `x` is bound in the nested scope — no outer edge.
+    expect(cfg.defUse.some(e => e.variable === 'x')).toBe(false);
+  });
+});
+
 // ─── per-language coverage ───────────────────────────────────────────────────
 
 describe('multi-language CFG', () => {
