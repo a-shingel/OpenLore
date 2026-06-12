@@ -399,7 +399,7 @@ export class McpWatcher {
           // parse. Seed resolution with all known nodes so re-parsed callers'
           // cross-file calls don't degrade to `external::`.
           const resolutionNodes = store.getAllInternalNodes();
-          const { edges: newEdges, nodes: newNodes } =
+          const { edges: newEdges, nodes: newNodes, cfgs: newCfgs } =
             await buildGraphSubset(f.rel, f.content, callerFiles, this.rootPath, resolutionNodes);
 
           // Atomic swap so concurrent MCP reads never see a torn graph.
@@ -409,8 +409,12 @@ export class McpWatcher {
               store.deleteOutgoingEdgesForFile(cf);
             }
             store.deleteNodesForFile(f.rel);
+            // Recompute only THIS file's overlay records — intra-procedural, so
+            // caller files' overlays stay valid (spec: add-intraprocedural-cfg-dataflow-overlay).
+            store.deleteCfgForFile(f.rel);
             store.insertNodes(newNodes);
             store.insertEdges(newEdges);
+            store.insertCfgs(newCfgs);
             store.setFileHash(f.rel, newHash);
           });
 
@@ -689,9 +693,10 @@ async function buildGraphSubset(
 ): Promise<{
   edges: import('../analyzer/call-graph.js').CallEdge[];
   nodes: import('../analyzer/call-graph.js').FunctionNode[];
+  cfgs: Array<{ functionId: string; filePath: string; cfg: import('../analyzer/cfg.js').FunctionCfg }>;
 }> {
   const lang = detectLanguage(changedRel);
-  if (!CALL_GRAPH_LANGS.has(lang)) return { edges: [], nodes: [] };
+  if (!CALL_GRAPH_LANGS.has(lang)) return { edges: [], nodes: [], cfgs: [] };
 
   const { CallGraphBuilder } = await import('../analyzer/call-graph.js');
   // Use relative paths as node IDs (consistent with analyze output)
@@ -716,5 +721,16 @@ async function buildGraphSubset(
   // Only return nodes from changedFile — callerFiles nodes are already in DB and unchanged
   const changedNodes = Array.from(result.nodes.values()).filter((n) => n.filePath === changedRel);
 
-  return { edges: result.edges, nodes: changedNodes };
+  // CFG/def-use overlay (spec: add-intraprocedural-cfg-dataflow-overlay) for the
+  // changed file's functions only — intra-procedural, so caller files' overlays
+  // are unaffected by this edit.
+  const cfgs: Array<{ functionId: string; filePath: string; cfg: import('../analyzer/cfg.js').FunctionCfg }> = [];
+  if (result.cfgs) {
+    for (const n of changedNodes) {
+      const cfg = result.cfgs.get(n.id);
+      if (cfg) cfgs.push({ functionId: n.id, filePath: changedRel, cfg });
+    }
+  }
+
+  return { edges: result.edges, nodes: changedNodes, cfgs };
 }

@@ -27,6 +27,7 @@ import {
 import { buildProjectedIac } from './iac/index.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
+import { buildFunctionCfg, type FunctionCfg, type CfgNode } from './cfg.js';
 import { logger } from '../../utils/logger.js';
 
 // ============================================================================
@@ -278,6 +279,14 @@ export interface InheritanceEdge {
 export interface CallGraphResult {
   nodes: Map<string, FunctionNode>;
   edges: CallEdge[];
+  /**
+   * Per-function intra-procedural control-flow + reaching-definitions overlay
+   * (spec: add-intraprocedural-cfg-dataflow-overlay), keyed by function id.
+   * Transient build-time data: persisted to the disposable SQLite store but
+   * deliberately NOT carried into {@link SerializedCallGraph}/the resident graph,
+   * so in-memory footprint is unchanged. Absent for unsupported languages.
+   */
+  cfgs?: Map<string, FunctionCfg>;
   /** Class-level structural nodes, derived from FunctionNode.className grouping */
   classes: ClassNode[];
   /** Inheritance / implementation edges between ClassNodes */
@@ -866,6 +875,35 @@ function extractDeclaration(
 }
 
 // ============================================================================
+// CFG / DATA-FLOW OVERLAY HELPER (spec: add-intraprocedural-cfg-dataflow-overlay)
+// ============================================================================
+
+/**
+ * Build the per-function CFG + reaching-definitions overlay for one function
+ * while its parse tree is still live. `fnNode` is the node captured as the
+ * function (may be a declaration wrapper, e.g. a `const f = () => {}`
+ * lexical_declaration); this resolves to the node that actually owns the body
+ * so arrow/function-expression bodies and params are analyzed too. Fail-soft:
+ * returns undefined for unsupported languages or any analysis surprise.
+ */
+function buildCfgFor(fnNode: Parser.SyntaxNode, language: string): FunctionCfg | undefined {
+  let target = fnNode;
+  if (!fnNode.childForFieldName('body')) {
+    // Dig (breadth-first) for an arrow/function-expression that owns a body.
+    const stack = [...fnNode.namedChildren];
+    while (stack.length) {
+      const n = stack.shift()!;
+      if (
+        (n.type === 'arrow_function' || n.type === 'function_expression' || n.type === 'function') &&
+        n.childForFieldName('body')
+      ) { target = n; break; }
+      stack.push(...n.namedChildren);
+    }
+  }
+  return buildFunctionCfg(target as unknown as CfgNode, language);
+}
+
+// ============================================================================
 // TYPESCRIPT EXTRACTOR
 // ============================================================================
 
@@ -897,7 +935,7 @@ const TS_CALL_QUERY = `
 async function extractTSGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[] }> {
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
   const { parser, lang } = await getTSParser();
   const tree = (parser as Parser).parse(content);
 
@@ -906,6 +944,7 @@ async function extractTSGraph(
 
   // --- Extract function nodes ---
   const nodes: FunctionNode[] = [];
+  const cfg = new Map<string, FunctionCfg>();
   const fnMatches = fnQuery.matches(tree.rootNode);
 
   for (const match of fnMatches) {
@@ -950,6 +989,9 @@ async function extractTSGraph(
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'TypeScript'),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'TypeScript'),
     });
+
+    const fnCfg = buildCfgFor(fnNode, 'TypeScript');
+    if (fnCfg) cfg.set(id, fnCfg);
   }
 
   // --- Extract calls ---
@@ -984,7 +1026,7 @@ async function extractTSGraph(
     });
   }
 
-  return { nodes, rawEdges };
+  return { nodes, rawEdges, cfg };
 }
 
 // ============================================================================
@@ -1026,7 +1068,7 @@ const PY_METHOD_CALL_QUERY = `
 async function extractPyGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[] }> {
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
   const { parser, lang } = await getPyParser();
   const tree = (parser as Parser).parse(content);
 
@@ -1034,6 +1076,7 @@ async function extractPyGraph(
 
   // --- Extract function nodes ---
   const nodes: FunctionNode[] = [];
+  const cfg = new Map<string, FunctionCfg>();
   const seen = new Set<number>(); // avoid duplicates from decorated_definition + function_definition
   const fnMatches = fnQuery.matches(tree.rootNode);
 
@@ -1085,6 +1128,9 @@ async function extractPyGraph(
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'Python'),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'Python'),
     });
+
+    const fnCfg = buildCfgFor(fnNode, 'Python');
+    if (fnCfg) cfg.set(id, fnCfg);
   }
 
   // --- Extract calls ---
@@ -1140,7 +1186,7 @@ async function extractPyGraph(
     });
   }
 
-  return { nodes, rawEdges };
+  return { nodes, rawEdges, cfg };
 }
 
 // ============================================================================
@@ -1168,7 +1214,7 @@ const GO_CALL_QUERY = `
 async function extractGoGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[] }> {
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
   const { parser, lang } = await getGoParser();
   const tree = (parser as Parser).parse(content);
 
@@ -1176,6 +1222,7 @@ async function extractGoGraph(
   const callQuery = new Parser.Query(lang as unknown as Parser.Language, GO_CALL_QUERY);
 
   const nodes: FunctionNode[] = [];
+  const cfg = new Map<string, FunctionCfg>();
   for (const match of fnQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'fn.name');
     const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -1207,6 +1254,9 @@ async function extractGoGraph(
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'Go'),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'Go'),
     });
+
+    const fnCfg = buildCfgFor(fnNode, 'Go');
+    if (fnCfg) cfg.set(id, fnCfg);
   }
 
   const rawEdges: RawEdge[] = [];
@@ -1225,7 +1275,7 @@ async function extractGoGraph(
     rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject: objectCapture?.node.text });
   }
 
-  return { nodes, rawEdges };
+  return { nodes, rawEdges, cfg };
 }
 
 // ============================================================================
@@ -3868,11 +3918,12 @@ export class CallGraphBuilder {
   ): Promise<CallGraphResult> {
     const allNodes = new Map<string, FunctionNode>();
     const allRawEdges: RawEdge[] = [];
+    const allCfgs = new Map<string, FunctionCfg>();
 
     // Pass 1: Extract nodes and raw edges from each file
     for (const file of files) {
       try {
-        let result: { nodes: FunctionNode[]; rawEdges: RawEdge[] };
+        let result: { nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg?: Map<string, FunctionCfg> };
 
         if (file.language === 'Python') {
           result = await extractPyGraph(file.path, file.content);
@@ -3920,6 +3971,7 @@ export class CallGraphBuilder {
           allNodes.set(node.id, node);
         }
         allRawEdges.push(...result.rawEdges);
+        if (result.cfg) for (const [id, fnCfg] of result.cfg) allCfgs.set(id, fnCfg);
       } catch (error) {
         // Skip files that fail to parse (syntax errors, encoding issues, etc.)
         if (process.env.DEBUG) {
@@ -4346,6 +4398,7 @@ export class CallGraphBuilder {
     return {
       nodes: allNodes,
       edges,
+      cfgs: allCfgs,
       classes,
       inheritanceEdges,
       hubFunctions,
