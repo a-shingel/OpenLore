@@ -154,3 +154,70 @@ describe('Secret Confinement (mcp-security)', () => {
     expect(ifaceMatch![1]).not.toMatch(/^\s*(value|secret|defaultValue)\s*[?:]/m);
   });
 });
+
+// ── LLM Provider Egress Discipline ────────────────────────────────────────────
+
+describe('LLM Provider Egress Discipline (mcp-security)', () => {
+  // The complete set of hosts the server is permitted to reach: the configured
+  // LLM/embedding provider defaults (overridable by the operator via baseUrl/env)
+  // and the loopback interface (the local `serve` daemon transport). Any new
+  // outbound destination must be added here deliberately — that is the point.
+  const ALLOWED_EGRESS_HOSTS = new Set([
+    'api.anthropic.com',
+    'api.openai.com',
+    'generativelanguage.googleapis.com',
+    '127.0.0.1',
+    'localhost',
+    '::1',
+  ]);
+
+  /** Strip a line if it is purely a // or * comment (docstrings carry example URLs). */
+  function isCommentLine(line: string): boolean {
+    const t = line.trim();
+    return t.startsWith('//') || t.startsWith('*') || t.startsWith('/*');
+  }
+
+  // Only the files that actually open a socket — that is where egress can happen.
+  const NETWORK_FILES = ALL_SOURCES.filter(f => /\bfetch\s*\(/.test(readFileSync(f, 'utf-8')));
+
+  it('every network-calling file exists and reaches only allowlisted hosts', () => {
+    expect(NETWORK_FILES.length, 'expected to find files that call fetch()').toBeGreaterThan(0);
+
+    const violations: string[] = [];
+    for (const file of NETWORK_FILES) {
+      const lines = readFileSync(file, 'utf-8').split('\n');
+      lines.forEach((line, i) => {
+        if (isCommentLine(line)) return;
+        // A URL that IS a string literal (quote immediately before the scheme) is a
+        // real destination/baseUrl. A URL appearing mid-string is prose (an error
+        // hint, an example) — not a fetch target. Template hosts ("${base}/x") have
+        // no literal host and are operator-configured, so they never match.
+        const re = /['"`]https?:\/\/([A-Za-z0-9.\-_]+)/g;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(line)) !== null) {
+          const host = m[1].toLowerCase();
+          if (!ALLOWED_EGRESS_HOSTS.has(host)) {
+            violations.push(`${file.replace(SRC, 'src')}:${i + 1} → ${host}`);
+          }
+        }
+      });
+    }
+    expect(violations, `non-allowlisted egress host(s):\n${violations.join('\n')}`).toEqual([]);
+  });
+
+  it('no analytics/telemetry/error-reporting SDK is imported (no covert egress sink)', () => {
+    const BANNED = /(['"])(@sentry\/\S+|posthog\S*|mixpanel\S*|@amplitude\/\S+|analytics-node|segment\S*|@datadog\/\S+|@bugsnag\/\S+)\1/;
+    const offenders: string[] = [];
+    for (const file of ALL_SOURCES) {
+      const src = readFileSync(file, 'utf-8');
+      // Only flag actual import/require of these packages.
+      for (const line of src.split('\n')) {
+        if (/\b(import|require)\b/.test(line) && BANNED.test(line)) {
+          offenders.push(file.replace(SRC, 'src'));
+          break;
+        }
+      }
+    }
+    expect(offenders, `analytics/telemetry SDK imported in: ${offenders.join(', ')}`).toEqual([]);
+  });
+});
