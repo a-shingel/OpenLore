@@ -11,7 +11,14 @@ import { tmpdir } from 'node:os';
 import { join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validateGitRef } from '../../drift/git-diff.js';
-import { safeJoin, sanitizeMcpError } from './utils.js';
+import {
+  safeJoin,
+  sanitizeMcpError,
+  readCachedContext,
+  loadMappingIndex,
+  _resetContextCacheForTesting,
+  clearMappingCache,
+} from './utils.js';
 import { redactSecrets, redactSecretString } from '../secret-redaction.js';
 import { TOOL_DEFINITIONS } from '../../../cli/commands/mcp.js';
 
@@ -294,5 +301,70 @@ describe('Path-Parameter Coverage Gate (mcp-security)', () => {
         `${handlerFile.replace(SRC, 'src')} reads disk field "${field}" but does not call safeJoin`,
       ).toBe(true);
     }
+  });
+});
+
+// ── Untrusted Artifact Deserialization Safety ─────────────────────────────────
+
+describe('Untrusted Artifact Deserialization Safety (mcp-security)', () => {
+  let root: string;
+  let analysisDir: string;
+
+  beforeEach(() => {
+    root = realpathRoot(mkdtempSync(join(tmpdir(), 'ol-sec-artifact-')));
+    analysisDir = join(root, '.openlore', 'analysis');
+    mkdirSync(analysisDir, { recursive: true });
+    _resetContextCacheForTesting();
+    clearMappingCache();
+  });
+  afterEach(() => {
+    _resetContextCacheForTesting();
+    clearMappingCache();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  function writeContext(content: string): void {
+    writeFileSync(join(analysisDir, 'llm-context.json'), content, 'utf-8');
+  }
+
+  it('returns null (fail closed) for a truncated analysis cache', async () => {
+    writeContext('{"callGraph": {"nodes": [ {"id": "a"');  // truncated mid-JSON
+    expect(await readCachedContext(root)).toBeNull();
+  });
+
+  it('returns null for a shape-invalid analysis cache (non-object top level)', async () => {
+    for (const bad of ['null', '42', '"a string"', '[1,2,3]', 'true']) {
+      _resetContextCacheForTesting();
+      writeContext(bad);
+      expect(await readCachedContext(root), `should reject top-level ${bad}`).toBeNull();
+    }
+  });
+
+  it('returns null when no analysis artifact exists at all', async () => {
+    expect(await readCachedContext(root)).toBeNull();
+  });
+
+  it('loadMappingIndex fails closed on a malformed mapping.json', async () => {
+    const writeMapping = (c: string) => writeFileSync(join(analysisDir, 'mapping.json'), c, 'utf-8');
+    for (const bad of ['null', '{}', '{"mappings": "nope"}', '[]', 'not json at all', '{"mappings": 5}']) {
+      clearMappingCache();
+      writeMapping(bad);
+      expect(await loadMappingIndex(root, 1), `should reject mapping ${bad}`).toBeNull();
+    }
+  });
+
+  it('a well-formed-but-empty mapping is accepted (shape valid)', async () => {
+    writeFileSync(join(analysisDir, 'mapping.json'), '{"mappings": []}', 'utf-8');
+    const idx = await loadMappingIndex(root, 1);
+    expect(idx).not.toBeNull();
+    expect(idx!.entries).toEqual([]);
+  });
+
+  it('readCachedContext bounds artifact size (regression: ARTIFACT_MAX_BYTES guard present)', () => {
+    // The oversized path is asserted structurally (writing a 512MB file in CI is
+    // wasteful); confirm the size gate exists in source so it can't be removed.
+    const src = readFileSync(join(SRC, 'core', 'services', 'mcp-handlers', 'utils.ts'), 'utf-8');
+    expect(src).toMatch(/ARTIFACT_MAX_BYTES\s*=\s*[\d *]+/);
+    expect(src).toMatch(/st\.size\s*>\s*ARTIFACT_MAX_BYTES/);
   });
 });

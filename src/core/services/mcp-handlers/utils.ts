@@ -154,6 +154,11 @@ const _contextCache = new Map<string, ContextCacheEntry>();
  * requests holding the old handle across an await can drain first. */
 const STALE_STORE_CLOSE_DELAY_MS = 30_000;
 
+/** Hard ceiling on the analysis artifact (.openlore/analysis/llm-context.json)
+ * before we deserialize it. Real contexts are single-digit MB; this generous cap
+ * exists only to fail closed on a poisoned/oversized artifact rather than OOM. */
+const ARTIFACT_MAX_BYTES = 512 * 1024 * 1024;
+
 /** Test-only: clear in-memory context cache to force cold path. */
 export function _resetContextCacheForTesting(): void {
   for (const entry of _contextCache.values()) entry.ctx.edgeStore?.close();
@@ -198,15 +203,33 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
 
   async function load(): Promise<CachedContext | null> {
     try {
-      const mtime = (await stat(filePath)).mtimeMs;
+      const st = await stat(filePath);
+      const mtime = st.mtimeMs;
       const cached = _contextCache.get(directory);
       if (cached && cached.mtime === mtime) {
         emit(directory, 'cache', { event: 'cache_read', hit: true });
         return cached.ctx;
       }
+      // mcp-security (Untrusted Artifact Deserialization): the analysis artifact
+      // lives under .openlore/ and is treated as untrusted input. Bound its size
+      // before reading so a poisoned/oversized file can't OOM the server; legit
+      // contexts are single-digit MB, far below this ceiling.
+      if (st.size > ARTIFACT_MAX_BYTES) {
+        emit(directory, 'cache', { event: 'cache_read', hit: false, reason: 'artifact_too_large', size: st.size });
+        return null;
+      }
       // Cache miss — read 3.7MB JSON and open EdgeStore connection
       const raw = await readFile(filePath, 'utf-8');
-      const ctx = JSON.parse(raw) as CachedContext;
+      const parsed: unknown = JSON.parse(raw);
+      // Validate top-level shape before use: a valid context is a non-null,
+      // non-array object. Fail closed on null/scalar/array so a malformed or
+      // schema-mismatched artifact yields a clean "re-run analyze" result
+      // downstream instead of propagating attacker-shaped values.
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        emit(directory, 'cache', { event: 'cache_read', hit: false, reason: 'artifact_shape_invalid' });
+        return null;
+      }
+      const ctx = parsed as CachedContext;
       if (EdgeStore.exists(analysisDir)) {
         const es = EdgeStore.open(EdgeStore.dbPath(analysisDir));
         // Schema-bump guard: opening a DB whose SCHEMA_VERSION is stale wipes it
@@ -404,7 +427,14 @@ export async function loadMappingIndex(absDir: string, retryCount: number = 1): 
   const loadAttempt = async (attempt: number): Promise<MappingIndex | null> => {
     try {
       const raw = await readFile(join(absDir, '.openlore', 'analysis', 'mapping.json'), 'utf-8');
-      const data = JSON.parse(raw) as { mappings: MappingEntry[] };
+      const parsed: unknown = JSON.parse(raw);
+      // Untrusted artifact: validate top-level shape before use. A malformed
+      // mapping.json (non-object, or no `mappings` array) fails closed — retrying
+      // can't fix a shape mismatch, so return null directly.
+      if (parsed === null || typeof parsed !== 'object' || !Array.isArray((parsed as { mappings?: unknown }).mappings)) {
+        return null;
+      }
+      const data = parsed as { mappings: MappingEntry[] };
       const entries = data.mappings ?? [];
       
       const byFile = new Map<string, MappingEntry[]>();
