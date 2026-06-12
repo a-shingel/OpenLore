@@ -466,7 +466,7 @@ class CfgBuilder {
 
     const condBlock = this.newBlock('loop');
     this.addEdge(current, condBlock, 'normal');
-    const cond = stmt.childForFieldName(spec.conditionField);
+    const cond = stmt.childForFieldName(spec.conditionField) ?? loopHeaderField(stmt, spec.conditionField);
     if (cond) this.recordUses(cond, condBlock);
 
     const bodyBlock = this.newBlock('normal');
@@ -770,14 +770,15 @@ class CfgBuilder {
   private recordLoopHeader(stmt: CfgNode, block: number): void {
     const { spec } = this;
     const line = stmt.startPosition.row + 1;
-    // C-style for: initializer field. for-of/for-in/range: left field.
-    const init = stmt.childForFieldName('initializer') ?? stmt.childForFieldName('init');
+    // C-style for: initializer field. for-of/for-in/range: left field. Go wraps
+    // these in a for_clause/range_clause child (loopHeaderField descends into it).
+    const init = loopHeaderField(stmt, 'initializer') ?? loopHeaderField(stmt, 'init');
     if (init) this.recordStmt(init, block);
-    const update = stmt.childForFieldName('update') ?? stmt.childForFieldName('increment');
+    const update = loopHeaderField(stmt, 'update') ?? loopHeaderField(stmt, 'increment');
     if (update) this.recordUses(update, block);
     // for (const x of xs) / for x in xs / for i, v := range xs
-    const left = stmt.childForFieldName('left');
-    const right = stmt.childForFieldName('right');
+    const left = loopHeaderField(stmt, 'left');
+    const right = loopHeaderField(stmt, 'right');
     if (right) this.recordUses(right, block);
     if (left && (spec.identTypes.has(left.type) || left.type.includes('pattern') || left.type === 'expression_list')) {
       this.recordTarget(left, block, line);
@@ -884,6 +885,17 @@ class CfgBuilder {
 /** Strip whitespace and array-index noise so an l-value is a stable key. */
 function normalizeLValue(text: string): string {
   return text.replace(/\s+/g, '');
+}
+
+/**
+ * Read a loop-header field (`initializer`/`condition`/`update`/`left`/`right`).
+ * Go wraps the header in a `for_clause` (C-style) or `range_clause` (range)
+ * child, so the fields live there, not on the `for_statement`; TS/JS expose them
+ * directly. This descends into the clause when present.
+ */
+function loopHeaderField(stmt: CfgNode, field: string): CfgNode | null {
+  const clause = stmt.namedChildren.find(c => c.type === 'for_clause' || c.type === 'range_clause');
+  return (clause ?? stmt).childForFieldName(field);
 }
 
 /**
@@ -1166,9 +1178,12 @@ function scopeDeclaredNames(scopeNode: CfgNode, spec: CfgLangSpec): Set<string> 
     else { const as = scopeNode.namedChildren.find(c => spec.identTypes.has(c.type)); if (as) names.add(as.text); }
   }
   if (spec.loopTypes.has(scopeNode.type)) {
-    const init = scopeNode.childForFieldName('initializer') ?? scopeNode.childForFieldName('init');
-    if (init) for (const c of init.namedChildren) if (spec.declTypes.has(c.type)) collectDeclNames(c, spec, names);
-    const left = scopeNode.childForFieldName('left'); // for-of / for-in / range target
+    const init = loopHeaderField(scopeNode, 'initializer') ?? loopHeaderField(scopeNode, 'init');
+    if (init) {
+      if (spec.declTypes.has(init.type)) collectDeclNames(init, spec, names);
+      for (const c of init.namedChildren) if (spec.declTypes.has(c.type)) collectDeclNames(c, spec, names);
+    }
+    const left = loopHeaderField(scopeNode, 'left'); // for-of / for-in / range target
     if (left) collectIdentLeaves(left, spec, names);
   }
   const scan = (n: CfgNode): void => {

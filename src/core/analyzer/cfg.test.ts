@@ -328,6 +328,23 @@ describe('idioms & escape-detection gaps', () => {
     expect(defLinesTo(cfg, 'x', 9)).toEqual([6, 8]); // except(6) or else(8); NOT try(4)
   });
 
+  it('Go C-style for loop defines its counter and carries it', async () => {
+    const lang = await goLang();
+    const cfg = cfgFor(`func f() int {\n\tsum := 0\n\tfor i := 0; i < 3; i++ {\n\t\tsum = sum + i\n\t}\n\treturn sum\n}`, lang, 'Go', GO_FN);
+    expect(cfg.defUse.some(e => e.variable === 'i')).toBe(true); // counter is visible
+    expect(defLinesTo(cfg, 'sum', 4)).toEqual([2, 4]);           // loop-carried
+  });
+
+  it('Go range vars are scoped to the loop (no alias to an outer same-name)', async () => {
+    const lang = await goLang();
+    // outer i=100 (line2); range i (line3) shadows it inside the body.
+    const cfg = cfgFor(`func f(xs []int) {\n\ti := 100\n\tfor i, v := range xs {\n\t\t_ = i\n\t\t_ = v\n\t}\n}`, lang, 'Go', GO_FN);
+    expect(cfg.defUse.some(e => e.variable === 'v')).toBe(true);  // range val is defined
+    // The body read of i must bind to the range i (line 3), never the outer i=100 (line 2).
+    expect(defLinesTo(cfg, 'i', 4)).toEqual([3]);
+    expect(cfg.defUse.some(e => e.variable === 'i' && e.defLine === 2 && e.precision === 'exact')).toBe(false);
+  });
+
   it('a labeled loop keeps its loop structure and loop-carried dependence', async () => {
     const lang = await tsLang();
     const cfg = cfgFor(`function f(){\n  let r = 0;\n  outer: for (let i=0;i<3;i++) {\n    r = r + 1;\n  }\n  return r;\n}`, lang, 'TypeScript', TS_FN);
