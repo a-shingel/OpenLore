@@ -45,8 +45,15 @@ import {
   WATCH_VCS_SETTLE_MS,
 } from '../../constants.js';
 
+// Languages the watcher incrementally re-graphs on edit. MUST include every
+// graphable language whose extension is in SOURCE_EXTENSIONS, otherwise editing
+// such a file makes buildGraphSubset return empty and the swap WIPES that file's
+// nodes/edges/overlay until the next full analyze (a graph-coverage regression).
+// C/C#/PHP/Kotlin grammars are optional deps: if absent, buildGraphSubset fails
+// soft to empty and the file simply isn't re-graphed (same as full analyze).
 const CALL_GRAPH_LANGS = new Set([
   'Python', 'TypeScript', 'JavaScript', 'Go', 'Rust', 'Ruby', 'Java', 'C++', 'Swift',
+  'C', 'C#', 'PHP', 'Kotlin',
 ]);
 /** Max callerFiles to re-parse in a single watch event (guards against high-fanIn renames). */
 const CALLER_REPARSE_LIMIT = 10;

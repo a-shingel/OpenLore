@@ -365,6 +365,38 @@ describe('McpWatcher.handleChange', () => {
     expect(toReturn.every(e => e.defLine === 3)).toBe(true);
   });
 
+  it('a C# edit refreshes (does NOT wipe) its nodes/overlay — watcher graph-lang coverage', async () => {
+    // C# (.cs) matches SOURCE_EXTENSIONS, so the watcher must also graph it,
+    // otherwise editing a .cs file made buildGraphSubset return empty and the
+    // swap wiped the file's nodes + overlay (graph-coverage regression).
+    const ctx = makeContext();
+    const { rootPath, outputPath } = await setupProject(ctx);
+    await mkdir(join(rootPath, 'src'), { recursive: true });
+    const rel = 'src/A.cs';
+    const srcFile = join(rootPath, rel);
+    const { CallGraphBuilder } = await import('../analyzer/call-graph.js');
+    const { createHash } = await import('node:crypto');
+    const v1 = 'class A { int f(int a){ int x=a; return x; } }';
+    await writeFile(srcFile, v1, 'utf-8');
+    const r = await new CallGraphBuilder().build([{ path: rel, content: v1, language: 'C#' }]);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    store.insertNodes(Array.from(r.nodes.values()));
+    store.insertCfgs([...r.cfgs!].map(([id, cfg]) => ({ functionId: id, filePath: rel, cfg })));
+    store.setFileHash(rel, createHash('sha256').update(v1).digest('hex'));
+    store.close();
+
+    await writeFile(srcFile, 'class A { int f(int a){ int x=a; x=x+1; return x; } }', 'utf-8');
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    await new McpWatcher({ rootPath, outputPath }).handleChange(srcFile);
+
+    const store2 = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    const nodes = store2.getNodesForFile(rel);
+    const overlay = store2.getCfg('src/A.cs::A.f');
+    store2.close();
+    expect(nodes.length).toBe(1);   // node preserved, not wiped
+    expect(overlay).toBeTruthy();   // overlay refreshed, not wiped
+  });
+
   it('skips re-index when file content is unchanged (hash cache hit)', async () => {
     const ctx = makeContext();
     const { rootPath, outputPath, contextPath } = await setupProject(ctx);
