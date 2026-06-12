@@ -5,10 +5,12 @@
 # so `brew install` users get the same bits as `npm i -g openlore` without
 # needing a global npm setup.
 #
-# This file is the canonical source. To ship it, copy it into a tap repository
-# (see packaging/homebrew/README.md) — Homebrew installs formulae from taps, not
-# from this directory. Bump `url` + `sha256` on every release (the README has the
-# exact commands).
+# This file is the canonical source. Homebrew installs formulae from taps, not
+# from this directory, so the release pipeline pushes this formula into the
+# clay-good/homebrew-openlore tap on every tagged release (the bump-homebrew job
+# in .github/workflows/release.yml regenerates `url` + `sha256` via
+# scripts/update-homebrew-formula.mjs). See packaging/homebrew/README.md for the
+# one-time tap setup and the manual bump command.
 class Openlore < Formula
   desc "Deterministic structural code-context substrate for coding agents"
   homepage "https://github.com/clay-good/OpenLore"

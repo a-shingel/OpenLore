@@ -31,23 +31,87 @@ core has [notability requirements](https://docs.brew.sh/Acceptable-Formulae)
 (meaningful stars/forks/watchers and a stable release history) and review latency.
 Pursue this once the tap has traction; the same formula works in both places.
 
-## Releasing a new version
+## One-time tap setup (walkthrough)
 
-On each npm publish, bump `url` and `sha256` in `openlore.rb` (and mirror the
-change into the tap). Compute them from the registry — no manual download of the
-repo needed:
+Do this once; after it, every tagged release updates the tap automatically (see
+"Automatic updates" below).
+
+1. **Create the tap repo.** It MUST be named `homebrew-openlore` (Homebrew maps
+   `brew tap clay-good/openlore` → `github.com/clay-good/homebrew-openlore`):
+
+   ```sh
+   gh repo create clay-good/homebrew-openlore --public \
+     --description "Homebrew tap for openlore"
+   ```
+
+2. **Seed the formula.** From a checkout of this repo, copy the current formula in:
+
+   ```sh
+   git clone https://github.com/clay-good/homebrew-openlore.git
+   cd homebrew-openlore
+   mkdir -p Formula
+   # refresh url+sha to the latest published npm version, then copy it in
+   ( cd /path/to/OpenLore && node scripts/update-homebrew-formula.mjs )
+   cp /path/to/OpenLore/packaging/homebrew/openlore.rb Formula/openlore.rb
+   git add Formula/openlore.rb
+   git commit -m "openlore $(grep -oE 'openlore-[0-9.]+' Formula/openlore.rb | head -1 | cut -d- -f2)"
+   git push
+   ```
+
+3. **Verify install works:**
+
+   ```sh
+   brew tap clay-good/openlore
+   brew install openlore        # or: brew install clay-good/openlore/openlore
+   openlore --version
+   ```
+
+4. **Enable CI auto-updates** (one secret): create a token that can push to the
+   tap repo and add it to *this* repo's secrets as `HOMEBREW_TAP_TOKEN`.
+
+   - A **fine-grained PAT** scoped to only `clay-good/homebrew-openlore` with
+     **Contents: Read and write** is the least-privilege choice:
+     GitHub → Settings → Developer settings → Fine-grained tokens → Generate.
+   - Then:
+
+     ```sh
+     gh secret set HOMEBREW_TAP_TOKEN --repo clay-good/OpenLore
+     # paste the token when prompted
+     ```
+
+   Until this secret exists, the release workflow's Homebrew step warns and skips
+   (npm publishing is unaffected).
+
+## Automatic updates (CI/CD)
+
+The same tag-triggered release pipeline that publishes to npm
+(`.github/workflows/release.yml`) updates the tap. After the `publish` job
+succeeds, the `bump-homebrew` job:
+
+1. resolves the version from `package.json`,
+2. runs `scripts/update-homebrew-formula.mjs` to pin `url` + `sha256` to the
+   freshly published registry tarball,
+3. checks out `clay-good/homebrew-openlore` with `HOMEBREW_TAP_TOKEN` and pushes
+   the updated `Formula/openlore.rb` (commit message `openlore <version>`).
+
+So the release flow is unchanged from your side: bump `package.json`, tag `vX.Y.Z`,
+push the tag — npm publishes and the tap follows automatically.
+
+## Manual bump (if ever needed)
+
+`scripts/update-homebrew-formula.mjs` pins the formula to a published version by
+fetching the registry tarball and computing its sha256:
 
 ```sh
-VERSION=$(node -p "require('./package.json').version")
-URL="https://registry.npmjs.org/openlore/-/openlore-${VERSION}.tgz"
-SHA=$(curl -sL "$URL" | shasum -a 256 | cut -d' ' -f1)
-echo "url \"$URL\""
-echo "sha256 \"$SHA\""
+node scripts/update-homebrew-formula.mjs            # uses package.json version, edits in place
+node scripts/update-homebrew-formula.mjs --version 2.0.17
+# or via npm:
+npm run homebrew:formula
 ```
 
-Then run `brew install --build-from-source ./openlore.rb` and `brew test openlore`
-against the tap to confirm the formula builds and `openlore --version` matches.
+Then `brew install --build-from-source ./openlore.rb` + `brew test openlore`
+against the tap confirm it builds and `openlore --version` matches.
 
-> The `url`/`sha256` in `openlore.rb` are pinned to a specific published version
-> on purpose — Homebrew requires a content hash for a fixed artifact, so the
-> formula is updated per release rather than tracking "latest".
+> The `url`/`sha256` are pinned to a specific published version on purpose —
+> Homebrew requires a content hash for a fixed artifact, so the formula is
+> updated per release rather than tracking "latest".
