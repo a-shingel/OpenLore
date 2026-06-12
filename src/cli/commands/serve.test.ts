@@ -11,6 +11,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtemp, rm, readFile, access, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { request as httpRequest } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { startServe, type ServeHandle } from './serve.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
@@ -48,6 +49,28 @@ function fileExists(p: string): Promise<boolean> {
 // to a loose record so the assertions below read cleanly.
 async function jsonOf(res: Response): Promise<Record<string, unknown>> {
   return (await res.json()) as Record<string, unknown>;
+}
+
+/**
+ * Raw HTTP GET with arbitrary headers. `fetch` forbids overriding `Host`/`Origin`,
+ * so the DNS-rebinding tests drop to node:http (setHost:false to keep our Host).
+ */
+function rawGet(
+  port: number,
+  path: string,
+  headers: Record<string, string>,
+): Promise<{ status: number }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      { host: '127.0.0.1', port, path, method: 'GET', headers, setHost: false },
+      (res) => {
+        res.resume(); // drain
+        res.on('end', () => resolve({ status: res.statusCode ?? 0 }));
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 describe('openlore serve', () => {
@@ -221,6 +244,34 @@ describe('openlore serve', () => {
     }
     expect(nodes).toBeGreaterThan(0); // rebuilt, not left empty
   }, 30_000);
+
+  it('rejects a spoofed (DNS-rebinding) Host header before dispatch', async () => {
+    const h = await boot();
+    // An attacker domain resolved to 127.0.0.1 still sends its name in Host.
+    const spoofed = await rawGet(h.port, '/health', { Host: 'attacker.example.com' });
+    expect(spoofed.status).toBe(403);
+    // A loopback Host is accepted.
+    const ok = await rawGet(h.port, '/health', { Host: `127.0.0.1:${h.port}` });
+    expect(ok.status).toBe(200);
+  });
+
+  it('rejects a cross-site Origin', async () => {
+    const h = await boot();
+    const cross = await rawGet(h.port, '/health', {
+      Host: `127.0.0.1:${h.port}`,
+      Origin: 'https://evil.example.com',
+    });
+    expect(cross.status).toBe(403);
+  });
+
+  it('refuses a non-loopback bind without a token', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-serve-'));
+    const prev = process.exitCode;
+    const h = await startServe({ directory: root, port: '0', watch: false, host: '0.0.0.0' });
+    expect(h).toBeUndefined();
+    expect(process.exitCode).toBe(1);
+    process.exitCode = prev; // don't fail the suite
+  });
 
   it('rejects an unknown preset at startup', async () => {
     root = await mkdtemp(join(tmpdir(), 'openlore-serve-'));
