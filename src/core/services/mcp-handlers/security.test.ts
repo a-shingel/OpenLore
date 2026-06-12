@@ -362,6 +362,16 @@ describe('Untrusted Artifact Deserialization Safety (mcp-security)', () => {
     expect(await readCachedContext(root)).toBeNull();
   });
 
+  it('fails closed on a corrupt SQLite edge store (does not crash)', async () => {
+    // Valid-shape context JSON next to a poisoned call-graph.db (random bytes).
+    writeContext('{"callGraph": {"nodes": []}}');
+    writeFileSync(join(analysisDir, 'call-graph.db'), Buffer.from('not a sqlite database at all — garbage'), 'utf-8');
+    _resetContextCacheForTesting();
+    // Must not throw; the corrupt store must not be served as a usable edge store.
+    const ctx = await readCachedContext(root);
+    expect(ctx === null || !ctx.edgeStore).toBe(true);
+  });
+
   it('loadMappingIndex fails closed on a malformed mapping.json', async () => {
     const writeMapping = (c: string) => writeFileSync(join(analysisDir, 'mapping.json'), c, 'utf-8');
     for (const bad of ['null', '{}', '{"mappings": "nope"}', '[]', 'not json at all', '{"mappings": 5}']) {
