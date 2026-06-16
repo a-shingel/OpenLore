@@ -186,6 +186,48 @@ describe('ContentAddressedStableSymbolId (analyzer spec)', () => {
     expect(movedAndEdited.stableId).toBe(before.stableId); // moved file + edited body → same id
   });
 
+  it('same-file container-name collapse keeps one node that resolves uniquely (completeness limit, not a wrong resolution)', async () => {
+    // Two distinct symbols in ONE file collide on the path id `file::Config.load`
+    // because the analyzer does not qualify by the enclosing namespace. The
+    // analyzer drops one at node aggregation (last-write-wins) BEFORE stableId is
+    // computed, so exactly one node carries the stableId and it resolves uniquely
+    // to a GENUINE symbol — the dropped twin is invisible everywhere (path id and
+    // stableId alike). This pins the documented behavior: a completeness gap the
+    // stableId derivation inherits, never a resolution to the wrong symbol.
+    const nodes = await build([ts('src/cfg.ts',
+      'export namespace A { export class Config { load(x: number): void {} } }\n' +
+      'export namespace B { export class Config { load(x: number): void {} } }\n')]);
+    const collapsed = nodes.filter(n => n.name === 'load' && n.className === 'Config');
+    expect(collapsed.length).toBe(1); // last-write-wins on the path id, not two nodes
+    expect(collapsed[0].id).toBe('src/cfg.ts::Config.load');
+    expect(collapsed[0].stableId).toBe('sid:Config.load(x: number)');
+
+    const dir = mkdtempSync(join(tmpdir(), 'stable-collapse-'));
+    try {
+      const store = EdgeStore.open(join(dir, 'graph.db'));
+      store.insertNodes(nodes);
+      // Resolves uniquely to the sole surviving node — never to a fabricated twin.
+      expect(store.getNodeByStableId('sid:Config.load(x: number)')?.id).toBe('src/cfg.ts::Config.load');
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('in-parameter comments participate in the shape (documented sensitivity, fails safe)', () => {
+    // signatureShape normalizes whitespace but does NOT strip comments inside the
+    // parameter list (a literal-aware stripper was deliberately omitted — a naive
+    // strip would corrupt string-literal defaults like URLs). Editing such a
+    // comment flips the stableId, so the symbol falls back to remove+add / orphaned
+    // rather than ever resolving to a WRONG identity. Pin the safe-direction limit.
+    const withComment = { name: 'f', signature: 'function f(a: number /* id */, b: string): void' } as FunctionNode;
+    const without = { name: 'f', signature: 'function f(a: number, b: string): void' } as FunctionNode;
+    expect(stableSymbolId(withComment)).not.toBe(stableSymbolId(without));
+    // The change is confined to identity (a benign miss), never a collision between
+    // two genuinely different symbols: the comment text is part of the key, so it
+    // can only make ids MORE distinct, not merge distinct symbols.
+  });
+
   it('Anonymous functions get no stable id (real analyzer output)', async () => {
     // An inline callback the analyzer never turns into a named node, plus the
     // synthetic per-file module grouping — neither carries a stableId.
