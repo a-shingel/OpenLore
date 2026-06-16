@@ -628,3 +628,20 @@ export const WATCH_VCS_SETTLE_MS = 750;
  * Tunable in one place so the bound stays consistent across the surface.
  */
 export const MAX_PROVENANCE_EDGES = 25;
+
+// ============================================================================
+// PAGERANK
+// ============================================================================
+// Single source of truth for the power-iteration parameters, shared by the
+// file-level importance ranker (dependency-graph.ts) and the query-conditioned
+// personalized-PageRank retrieval ranker (personalized-pagerank.ts) so neither
+// invents its own tuning constant (change add-personalized-pagerank-context-ranking).
+
+/** Random-walk continuation probability (1 − teleport). The canonical PageRank value. */
+export const PAGERANK_DAMPING_FACTOR = 0.85;
+
+/** Power-iteration convergence threshold on the maximum per-node delta. */
+export const PAGERANK_CONVERGENCE_TOLERANCE = 1e-6;
+
+/** Hard cap on power-iteration passes — a termination bound, not a tuning weight. */
+export const PAGERANK_MAX_ITERATIONS = 100;

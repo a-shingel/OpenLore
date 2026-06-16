@@ -166,12 +166,16 @@ describe('tools/list payload budget (spec-28)', () => {
   // (`valueLevel` + `valueParam`) was added to analyze_impact and trace_execution_path
   // (spec: add-intraprocedural-cfg-dataflow-overlay) — two opt-in props per tool,
   // a conscious decision, not silent drift.
+  // Nav bumped 12_300 → 12_500 and full 54_000 → 55_000 when the opt-in personalized-
+  // PageRank ranking mode (`rankBy` on orient + `rankBy`/`tokenBudget` on get_minimal_context;
+  // spec: add-personalized-pagerank-context-ranking) was added — a ranking MODE on existing
+  // tools, no new tool, default surface count unchanged. Conscious decision, not silent drift.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({})).toBeLessThan(54_000);
+    expect(payloadBytes({})).toBeLessThan(55_000);
   });
 
   it('navigation preset stays lean (the low-overhead surface that wins the benchmark)', () => {
-    expect(payloadBytes({ preset: 'navigation' })).toBeLessThan(12_300);
+    expect(payloadBytes({ preset: 'navigation' })).toBeLessThan(12_500);
   });
 
   // Lossless-dedup invariant: the `directory` input is shared by every tool, so its

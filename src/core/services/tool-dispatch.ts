@@ -108,8 +108,8 @@ export async function dispatchTool(
   directory: string,
 ): Promise<unknown> {
   if (name === 'orient') {
-    const { task, limit = 5, tokenBudget, lean } = args as { task: string; limit?: number; tokenBudget?: number; lean?: boolean };
-    return handleOrient(directory, task, limit, tokenBudget, lean);
+    const { task, limit = 5, tokenBudget, lean, rankBy } = args as { task: string; limit?: number; tokenBudget?: number; lean?: boolean; rankBy?: 'distance' | 'pagerank' };
+    return handleOrient(directory, task, limit, tokenBudget, lean, rankBy);
   } else if (name === 'analyze_codebase') {
     const { directory, force = false } = args as { directory: string; force?: boolean };
     return handleAnalyzeCodebase(directory, force);
@@ -262,9 +262,9 @@ export async function dispatchTool(
       args as { directory: string; domains?: string[]; minCoverage?: number };
     return handleGetTestCoverage({ directory, domains, minCoverage });
   } else if (name === 'get_minimal_context') {
-    const { directory, functionName, filePath } =
-      args as { directory: string; functionName: string; filePath?: string };
-    return handleGetMinimalContext(directory, functionName, filePath);
+    const { directory, functionName, filePath, rankBy, tokenBudget } =
+      args as { directory: string; functionName: string; filePath?: string; rankBy?: 'distance' | 'pagerank'; tokenBudget?: number };
+    return handleGetMinimalContext(directory, functionName, filePath, rankBy, tokenBudget);
   } else if (name === 'get_cluster') {
     const { directory, functionName } = args as { directory: string; functionName: string };
     return handleGetCluster(directory, functionName);

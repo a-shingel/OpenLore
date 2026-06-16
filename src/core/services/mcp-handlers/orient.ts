@@ -163,6 +163,7 @@ export async function handleOrient(
   limit = 5,
   tokenBudget?: number,
   lean = false,
+  rankBy: 'distance' | 'pagerank' = 'distance',
 ): Promise<unknown> {
   const tooLong = queryTooLongError(task, 'task'); if (tooLong) return tooLong;
   const absDir = await validateDirectory(directory);
@@ -574,12 +575,13 @@ export async function handleOrient(
   // runs in full mode only (lean skips the work).
   const ORIENT_LANDMARK_MAX_DISTANCE = 4;
   const ORIENT_LANDMARK_LIMIT = 6;
-  let landmarks: Array<{ id: string; name: string; file: string; distance: number; hops: number; signals: unknown[] }> | undefined;
+  let landmarks: Array<{ id: string; name: string; file: string; distance: number; hops: number; relevance?: number; signals: unknown[] }> | undefined;
   if (!lean && llmCtx?.callGraph) {
     try {
       const cg = llmCtx.callGraph as SerializedCallGraph;
       const { computeLandmarkSignals } = await import('../../analyzer/landmark-signals.js');
       const { buildWeightedAdjacency, weightedBfs } = await import('./graph.js');
+      const { personalizedPageRank, mergeUndirected } = await import('../../analyzer/personalized-pagerank.js');
       const { volatilityLevel } = await import('../../provenance/change-coupling.js');
 
       // volatile from the persisted churn table; dead intentionally omitted.
@@ -606,21 +608,28 @@ export async function handleOrient(
       if (seedIds.length > 0 && landmarkById.size > 0) {
         // Undirected weighted adjacency: a nearby caller OR callee is "near".
         const { forward, backward } = buildWeightedAdjacency(cg);
-        const undirected = new Map<string, Array<{ to: string; cost: number }>>();
-        for (const m of [forward, backward]) {
-          for (const [k, arr] of m) {
-            const cur = undirected.get(k);
-            if (cur) cur.push(...arr); else undirected.set(k, [...arr]);
-          }
-        }
-        const ranked = [...weightedBfs(seedIds, undirected, ORIENT_LANDMARK_MAX_DISTANCE).entries()]
-          .filter(([id]) => !seedSet.has(id) && landmarkById.has(id))
-          .map(([id, r]) => ({ lm: landmarkById.get(id)!, distance: r.distance, hops: r.hops }))
-          .sort((a, b) => a.distance - b.distance || a.lm.id.localeCompare(b.lm.id))
+        const undirected = mergeUndirected(forward, backward);
+        // Default: order the task's nearby structural anchors by call-distance proximity.
+        // Opt-in pagerank mode: order the SAME candidates by query-conditioned connectivity
+        // (personalized PageRank seeded on the matched functions) over the same bounded
+        // neighbourhood — multi-path relevance, not just nearest distance. Default is unchanged.
+        const reach = weightedBfs(seedIds, undirected, ORIENT_LANDMARK_MAX_DISTANCE);
+        const candidates = [...reach.entries()]
+          .filter(([id]) => !seedSet.has(id) && landmarkById.has(id));
+        const scores = rankBy === 'pagerank'
+          ? personalizedPageRank(undirected, seedIds, reach.keys())
+          : undefined;
+        const ranked = candidates
+          .map(([id, r]) => ({ lm: landmarkById.get(id)!, distance: r.distance, hops: r.hops, relevance: scores?.get(id) ?? 0 }))
+          .sort((a, b) => scores
+            ? (b.relevance - a.relevance || a.lm.id.localeCompare(b.lm.id))
+            : (a.distance - b.distance || a.lm.id.localeCompare(b.lm.id)))
           .slice(0, ORIENT_LANDMARK_LIMIT);
         if (ranked.length > 0) {
-          landmarks = ranked.map(({ lm, distance, hops }) => ({
-            id: lm.id, name: lm.name, file: relative(absDir, lm.filePath), distance, hops, signals: lm.signals,
+          landmarks = ranked.map(({ lm, distance, hops, relevance }) => ({
+            id: lm.id, name: lm.name, file: relative(absDir, lm.filePath), distance, hops,
+            ...(scores ? { relevance: Math.round(relevance * 1e6) / 1e6 } : {}),
+            signals: lm.signals,
           }));
         }
       }

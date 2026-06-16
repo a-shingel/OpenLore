@@ -47,6 +47,8 @@ import {
 import { readOpenLoreConfig } from '../config-manager.js';
 import { validateDirectory, readCachedContext, isCacheFresh, safeJoin, safeOpenspecDir } from './utils.js';
 import { buildWeightedAdjacency, weightedBfs } from './graph.js';
+import { personalizedPageRank } from '../../analyzer/personalized-pagerank.js';
+import { applyTokenBudget } from './progressive.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import type { MappingArtifact } from '../../generator/mapping-generator.js';
 import { openloreAudit } from '../../../api/audit.js';
@@ -928,6 +930,8 @@ export async function handleGetMinimalContext(
   directory: string,
   functionName: string,
   filePath?: string,
+  rankBy: 'distance' | 'pagerank' = 'distance',
+  tokenBudget?: number,
 ): Promise<unknown> {
   const absDir = await validateDirectory(directory);
   const ctx = await readCachedContext(absDir);
@@ -970,31 +974,61 @@ export async function handleGetMinimalContext(
   for (const e of callsEdges) callTypeByEdge.set(`${e.callerId} ${e.calleeId}`, e.callType ?? 'direct');
 
   const { forward, backward } = buildWeightedAdjacency(cg);
+  const pagerank = rankBy === 'pagerank';
+  const budget = pagerank ? tokenBudget : undefined;
+
+  // Bounded neighbourhoods the ranking runs over — reused by BOTH rankers, so personalized
+  // PageRank stays proportional to the task neighbourhood (the risk-tier distance budget),
+  // not the whole repository.
+  const callerReach = weightedBfs([target.id], backward, distanceBudget);
+  const calleeReach = weightedBfs([target.id], forward, distanceBudget);
+
+  // Query-conditioned relevance over each bounded neighbourhood (pagerank mode only): seed
+  // the walk on the target and let connectivity — not just nearest distance — order the
+  // candidates. Default mode computes nothing here and stays byte-identical to before.
+  const callerScores = pagerank ? personalizedPageRank(backward, [target.id], callerReach.keys()) : new Map<string, number>();
+  const calleeScores = pagerank ? personalizedPageRank(forward, [target.id], calleeReach.keys()) : new Map<string, number>();
+
+  // Order -> cap -> (pagerank) token-budget a neighbour list. In default mode this reproduces
+  // the prior distance-then-fanIn ordering and JSON shape exactly. In pagerank mode it orders
+  // by relevance (id tie-break), attaches the relevance value, and fits the token budget —
+  // reporting how many lower-ranked neighbours were omitted rather than silently truncating.
+  const select = <T extends { id: string; distance: number; _rank: number; _rel: number }>(items: T[]) => {
+    const ordered = pagerank
+      ? [...items].sort((a, b) => b._rel - a._rel || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      : [...items].sort((a, b) => a.distance - b.distance || b._rank - a._rank);
+    // Project to the FINAL returned shape BEFORE budgeting, so the token estimate is
+    // costed on what's actually emitted (the long `id`/`_rank`/`_rel` scratch fields are
+    // dropped here, not measured) rather than over-counting and over-reporting overflow.
+    const projected = ordered.slice(0, kCap).map(({ id: _id, _rank, _rel, ...rest }) =>
+      pagerank ? { ...rest, relevance: Math.round(_rel * 1e6) / 1e6 } : rest,
+    );
+    const { kept, omitted } = budget ? applyTokenBudget(projected, budget) : { kept: projected, omitted: 0 };
+    return { list: kept, omitted };
+  };
 
   // Callers: nearest-by-call-distance over the backward (callee→caller) adjacency.
-  const callers = [...weightedBfs([target.id], backward, distanceBudget).entries()]
+  const callerItems = [...callerReach.entries()]
     .filter(([id]) => id !== target.id)
     .map(([id, r]) => {
       const n = nodeMap.get(id);
       if (!n || n.isExternal) return null;
       const callType = callTypeByEdge.get(`${id} ${r.predecessor}`) ?? 'direct';
-      return { name: n.name, file: relative(absDir, n.filePath), sig: sig(n), callType, isExternal: false, distance: r.distance, hops: r.hops, _rank: n.fanIn };
+      return { id, name: n.name, file: relative(absDir, n.filePath), sig: sig(n), callType, isExternal: false, distance: r.distance, hops: r.hops, _rank: n.fanIn, _rel: callerScores.get(id) ?? 0 };
     })
-    .filter((n): n is NonNullable<typeof n> => !!n)
-    .sort((a, b) => a.distance - b.distance || b._rank - a._rank)
-    .slice(0, kCap)
-    .map(({ _rank, ...rest }) => rest);
+    .filter((n): n is NonNullable<typeof n> => !!n);
+  const { list: callers, omitted: callersOmitted } = select(callerItems);
 
   // Callees: nearest-by-call-distance over the forward (caller→callee) adjacency,
   // plus direct external callees (synthetic leaves the weighted pass skips) so the
   // function's external dependencies (fetch, db, fs) stay visible.
-  const internalCallees = [...weightedBfs([target.id], forward, distanceBudget).entries()]
+  const internalCallees = [...calleeReach.entries()]
     .filter(([id]) => id !== target.id)
     .map(([id, r]) => {
       const n = nodeMap.get(id);
       if (!n || n.isExternal) return null;
       const callType = callTypeByEdge.get(`${r.predecessor} ${id}`) ?? 'direct';
-      return { name: n.name, file: relative(absDir, n.filePath), sig: sig(n), callType, isExternal: false, kind: undefined as string | undefined, distance: r.distance, hops: r.hops, _rank: n.fanOut };
+      return { id, name: n.name, file: relative(absDir, n.filePath), sig: sig(n), callType, isExternal: false, kind: undefined as string | undefined, distance: r.distance, hops: r.hops, _rank: n.fanOut, _rel: calleeScores.get(id) ?? 0 };
     })
     .filter((n): n is NonNullable<typeof n> => !!n);
 
@@ -1005,15 +1039,13 @@ export async function handleGetMinimalContext(
     .filter((n): n is NonNullable<typeof n> => !!n && !!n.isExternal)
     .filter(n => !seenExternal.has(n.id) && (seenExternal.add(n.id), true))
     .map(n => ({
+      id: n.id,
       name: `[external] ${n.name}`, file: 'external', sig: sig(n),
       callType: callTypeByEdge.get(`${target.id} ${n.id}`) ?? 'direct',
-      isExternal: true, kind: n.externalKind as string | undefined, distance: 1, hops: 1, _rank: 0,
+      isExternal: true, kind: n.externalKind as string | undefined, distance: 1, hops: 1, _rank: 0, _rel: 0,
     }));
 
-  const callees = [...internalCallees, ...externalCallees]
-    .sort((a, b) => a.distance - b.distance || b._rank - a._rank)
-    .slice(0, kCap)
-    .map(({ _rank, ...rest }) => rest);
+  const { list: callees, omitted: calleesOmitted } = select([...internalCallees, ...externalCallees]);
 
   // Test coverage — distinguish import-based vs call-based tracing
   const seenTestNames = new Set<string>();
@@ -1056,6 +1088,14 @@ export async function handleGetMinimalContext(
     callers,
     callees,
     testedBy,
+    ...(pagerank ? { rankedBy: 'pagerank' as const } : {}),
+    ...(pagerank && (callersOmitted > 0 || calleesOmitted > 0)
+      ? { omittedForBudget: {
+          callers: callersOmitted,
+          callees: calleesOmitted,
+          note: 'lower-ranked neighbours were omitted to fit tokenBudget; raise tokenBudget or fetch a specific neighbour with get_function_body',
+        } }
+      : {}),
   };
 }
 
