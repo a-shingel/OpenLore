@@ -9,6 +9,11 @@
 import { ImportExportParser, resolveImport, type ExportInfo, type FileAnalysis } from './import-parser.js';
 import { extractAllHttpEdges, type HttpEdge } from './http-route-parser.js';
 import type { ScoredFile } from '../../types/index.js';
+import {
+  PAGERANK_DAMPING_FACTOR,
+  PAGERANK_CONVERGENCE_TOLERANCE,
+  PAGERANK_MAX_ITERATIONS,
+} from '../../constants.js';
 
 // ============================================================================
 // CONSTANTS
@@ -180,8 +185,8 @@ export class DependencyGraphBuilder {
       rootDir: options.rootDir,
       extensions: options.extensions ?? [],  // empty = auto-detect per file in resolveImport
       minClusterSize: options.minClusterSize ?? 2,
-      dampingFactor: options.dampingFactor ?? 0.85,
-      maxIterations: options.maxIterations ?? 100,
+      dampingFactor: options.dampingFactor ?? PAGERANK_DAMPING_FACTOR,
+      maxIterations: options.maxIterations ?? PAGERANK_MAX_ITERATIONS,
     };
   }
 
@@ -513,7 +518,7 @@ export class DependencyGraphBuilder {
       [pageRank, newPageRank] = [newPageRank, pageRank];
 
       // Check convergence
-      if (maxDiff < 1e-6) break;
+      if (maxDiff < PAGERANK_CONVERGENCE_TOLERANCE) break;
     }
 
     // Normalize and update nodes

@@ -989,6 +989,120 @@ describe('handleGetMinimalContext', () => {
 });
 
 // ============================================================================
+// handleGetMinimalContext — opt-in personalized-PageRank ranking mode
+// (change: add-personalized-pagerank-context-ranking)
+// ============================================================================
+
+describe('handleGetMinimalContext — pagerank ranking mode', () => {
+  let tmpDir: string;
+  let readCachedContext: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    tmpDir = await createTmpDir();
+    const utils = await import('./utils.js');
+    vi.mocked(utils.validateDirectory).mockResolvedValue(tmpDir);
+    readCachedContext = vi.mocked(utils.readCachedContext);
+  });
+
+  const mk = (id: string, fanIn = 0, fanOut = 0) => ({
+    id, name: id.split('::')[1], filePath: `${tmpDir}/${id.split('::')[0]}`,
+    signature: `${id.split('::')[1]}()`, language: 'typescript',
+    fanIn, fanOut, startLine: 1, endLine: 3, isExternal: false, isTest: false,
+  });
+
+  // A graph where, among the callers of `target`, `multi` is reachable by several
+  // independent backward paths while `single` is reachable by one — at equal distance.
+  function connectivityGraph() {
+    return makeCallGraph({
+      nodes: [
+        mk('src/t.ts::target', 4),
+        mk('src/a.ts::multi'), mk('src/b.ts::single'),
+        mk('src/p.ts::p1'), mk('src/p.ts::p2'), mk('src/p.ts::p3'), mk('src/q.ts::q1'),
+      ],
+      edges: [
+        // three independent 2-hop backward paths converge on `multi`
+        { callerId: 'src/p.ts::p1', calleeId: 'src/t.ts::target', calleeName: 'target', confidence: 'import', kind: 'calls' },
+        { callerId: 'src/p.ts::p2', calleeId: 'src/t.ts::target', calleeName: 'target', confidence: 'import', kind: 'calls' },
+        { callerId: 'src/p.ts::p3', calleeId: 'src/t.ts::target', calleeName: 'target', confidence: 'import', kind: 'calls' },
+        { callerId: 'src/a.ts::multi', calleeId: 'src/p.ts::p1', calleeName: 'p1', confidence: 'import', kind: 'calls' },
+        { callerId: 'src/a.ts::multi', calleeId: 'src/p.ts::p2', calleeName: 'p2', confidence: 'import', kind: 'calls' },
+        { callerId: 'src/a.ts::multi', calleeId: 'src/p.ts::p3', calleeName: 'p3', confidence: 'import', kind: 'calls' },
+        // a single 2-hop backward path to `single`
+        { callerId: 'src/q.ts::q1', calleeId: 'src/t.ts::target', calleeName: 'target', confidence: 'import', kind: 'calls' },
+        { callerId: 'src/b.ts::single', calleeId: 'src/q.ts::q1', calleeName: 'q1', confidence: 'import', kind: 'calls' },
+      ],
+    });
+  }
+
+  it('default output is byte-identical with rankBy omitted vs rankBy="distance"', async () => {
+    readCachedContext.mockResolvedValue({ callGraph: connectivityGraph() });
+    const { handleGetMinimalContext } = await import('./analysis.js');
+    const omitted = await handleGetMinimalContext(tmpDir, 'target');
+    const explicit = await handleGetMinimalContext(tmpDir, 'target', undefined, 'distance');
+    expect(JSON.stringify(explicit)).toBe(JSON.stringify(omitted));
+  });
+
+  it('default output carries no pagerank fields (relevance / rankedBy)', async () => {
+    readCachedContext.mockResolvedValue({ callGraph: connectivityGraph() });
+    const { handleGetMinimalContext } = await import('./analysis.js');
+    const result = await handleGetMinimalContext(tmpDir, 'target') as Record<string, unknown>;
+    expect(result.rankedBy).toBeUndefined();
+    for (const c of result.callers as Array<Record<string, unknown>>) {
+      expect(c.relevance).toBeUndefined();
+    }
+  });
+
+  it('pagerank mode orders callers by connectivity, not just distance, and attaches relevance', async () => {
+    readCachedContext.mockResolvedValue({ callGraph: connectivityGraph() });
+    const { handleGetMinimalContext } = await import('./analysis.js');
+    const result = await handleGetMinimalContext(tmpDir, 'target', undefined, 'pagerank') as {
+      rankedBy: string; callers: Array<{ name: string; relevance: number }>;
+    };
+    expect(result.rankedBy).toBe('pagerank');
+    const multi = result.callers.find(c => c.name === 'multi')!;
+    const single = result.callers.find(c => c.name === 'single')!;
+    expect(multi).toBeTruthy();
+    expect(single).toBeTruthy();
+    // the many-paths caller outranks the single-path caller at equal distance
+    expect(multi.relevance).toBeGreaterThan(single.relevance);
+    expect(result.callers.findIndex(c => c.name === 'multi'))
+      .toBeLessThan(result.callers.findIndex(c => c.name === 'single'));
+  });
+
+  it('pagerank mode is deterministic across runs', async () => {
+    readCachedContext.mockResolvedValue({ callGraph: connectivityGraph() });
+    const { handleGetMinimalContext } = await import('./analysis.js');
+    const a = await handleGetMinimalContext(tmpDir, 'target', undefined, 'pagerank');
+    const b = await handleGetMinimalContext(tmpDir, 'target', undefined, 'pagerank');
+    expect(JSON.stringify(b)).toBe(JSON.stringify(a));
+  });
+
+  it('pagerank + tokenBudget fits the budget and reports omitted neighbours', async () => {
+    readCachedContext.mockResolvedValue({ callGraph: connectivityGraph() });
+    const { handleGetMinimalContext } = await import('./analysis.js');
+    // A tiny budget forces overflow among the callers.
+    const result = await handleGetMinimalContext(tmpDir, 'target', undefined, 'pagerank', 30) as {
+      callers: unknown[];
+      omittedForBudget?: { callers: number; callees: number; note: string };
+    };
+    expect(result.omittedForBudget).toBeTruthy();
+    expect(result.omittedForBudget!.callers).toBeGreaterThan(0);
+    expect(result.omittedForBudget!.note).toMatch(/tokenBudget/);
+    // budget is binding: fewer callers than the full set fit
+    expect(result.callers.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('tokenBudget is ignored in default (distance) mode — no silent truncation of the default shape', async () => {
+    readCachedContext.mockResolvedValue({ callGraph: connectivityGraph() });
+    const { handleGetMinimalContext } = await import('./analysis.js');
+    const budgeted = await handleGetMinimalContext(tmpDir, 'target', undefined, 'distance', 5);
+    const plain = await handleGetMinimalContext(tmpDir, 'target');
+    expect(JSON.stringify(budgeted)).toBe(JSON.stringify(plain));
+  });
+});
+
+// ============================================================================
 // handleGetCluster
 // ============================================================================
 

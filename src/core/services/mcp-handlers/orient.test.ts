@@ -211,6 +211,59 @@ describe('handleOrient', () => {
     expect('landmarks' in lean).toBe(false); // lean omits the enrichment
   });
 
+  it('opt-in pagerank mode reorders landmarks by connectivity; default ordering is unchanged', async () => {
+    vi.mocked(VectorIndex.exists).mockReturnValue(true);
+    vi.mocked(VectorIndex.search).mockResolvedValue([
+      makeSearchResult({ name: 'seedFn', filePath: 'src/a.ts', id: 'src/a.ts::seedFn' }),
+    ]);
+    const mk = (id: string, fanIn: number, fanOut: number) => ({
+      id, name: id.split('::')[1], filePath: id.split('::')[0], isAsync: false, language: 'typescript',
+      startIndex: 0, endIndex: 1, fanIn, fanOut, isExternal: false, isTest: false,
+    });
+    const seed = mk('src/a.ts::seedFn', 1, 4);
+    // Two hubs, BOTH one hop (distance 1) from the seed. `zHub` is additionally reachable
+    // by two more independent routes (seed→m1→zHub, seed→m2→zHub); `aHub` by one route.
+    // Distance ranking ties them and breaks on id (aHub first). PageRank, measuring
+    // connectivity, ranks the many-routes hub (zHub) first — so the order flips.
+    const aHub = mk('src/a.ts::aHub', 40, 2);
+    const zHub = mk('src/a.ts::zHub', 40, 2);
+    const m1 = mk('src/a.ts::m1', 1, 1);
+    const m2 = mk('src/a.ts::m2', 1, 1);
+    const callGraph = {
+      nodes: [seed, aHub, zHub, m1, m2],
+      edges: [
+        { callerId: seed.id, calleeId: aHub.id, calleeName: 'aHub', confidence: 'import', kind: 'calls' },
+        { callerId: seed.id, calleeId: zHub.id, calleeName: 'zHub', confidence: 'import', kind: 'calls' },
+        { callerId: seed.id, calleeId: m1.id, calleeName: 'm1', confidence: 'import', kind: 'calls' },
+        { callerId: seed.id, calleeId: m2.id, calleeName: 'm2', confidence: 'import', kind: 'calls' },
+        { callerId: m1.id, calleeId: zHub.id, calleeName: 'zHub', confidence: 'import', kind: 'calls' },
+        { callerId: m2.id, calleeId: zHub.id, calleeName: 'zHub', confidence: 'import', kind: 'calls' },
+      ],
+      classes: [], inheritanceEdges: [], hubFunctions: [aHub, zHub], entryPoints: [], layerViolations: [],
+      stats: { totalNodes: 5, totalEdges: 6, avgFanIn: 0, avgFanOut: 0 },
+    };
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph } as never);
+
+    type Lm = { name: string; relevance?: number };
+    const distance = await handleOrient('/tmp/proj', 'work on seedFn', 5, undefined, false, 'distance') as { landmarks?: Lm[] };
+    const pagerank = await handleOrient('/tmp/proj', 'work on seedFn', 5, undefined, false, 'pagerank') as { landmarks?: Lm[] };
+    const omitted = await handleOrient('/tmp/proj', 'work on seedFn', 5, undefined, false) as { landmarks?: Lm[] };
+
+    // Default (distance) ordering: id tie-break puts aHub before zHub, and carries no relevance.
+    const distNames = distance.landmarks!.map(l => l.name);
+    expect(distNames.indexOf('aHub')).toBeLessThan(distNames.indexOf('zHub'));
+    expect(distance.landmarks!.every(l => l.relevance === undefined)).toBe(true);
+    // rankBy omitted is byte-identical to rankBy:'distance' (default unchanged).
+    expect(JSON.stringify(omitted)).toBe(JSON.stringify(distance));
+
+    // PageRank ordering: the better-connected hub comes first, and relevance is attached.
+    const prNames = pagerank.landmarks!.map(l => l.name);
+    expect(prNames.indexOf('zHub')).toBeLessThan(prNames.indexOf('aHub'));
+    expect(pagerank.landmarks!.find(l => l.name === 'zHub')!.relevance).toBeGreaterThan(
+      pagerank.landmarks!.find(l => l.name === 'aHub')!.relevance!,
+    );
+  });
+
   it('suggests the navigation tools by task intent (find_path / get_map)', async () => {
     vi.mocked(VectorIndex.exists).mockReturnValue(true);
     vi.mocked(VectorIndex.search).mockResolvedValue([makeSearchResult({ name: 'doFoo', filePath: 'src/foo.ts' })]);

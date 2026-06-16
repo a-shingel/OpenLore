@@ -167,6 +167,11 @@ export const TOOL_DEFINITIONS = [
           type: 'boolean',
           description: 'Return only the navigation core (relevantFunctions + callPaths + specDomains); drop provenance/change-coupling/insertion-points/specs/decisions enrichment (each reachable via expand handles or dedicated tools). Lower per-call cost for shallow "who/where" lookups.',
         },
+        rankBy: {
+          type: 'string',
+          enum: ['distance', 'pagerank'],
+          description: 'Opt-in landmark ordering (default "distance"). "pagerank" orders task-scoped landmarks by personalized PageRank seeded on the matched functions — connectivity-weighted relevance, not just nearest distance. Default output unchanged.',
+        },
       },
       required: ['directory', 'task'],
     },
@@ -1254,6 +1259,15 @@ export const TOOL_DEFINITIONS = [
         filePath: {
           type: 'string',
           description: 'Optional relative file path to disambiguate when multiple functions share the name',
+        },
+        rankBy: {
+          type: 'string',
+          enum: ['distance', 'pagerank'],
+          description: 'Opt-in caller/callee ordering (default "distance"). "pagerank" orders neighbours by personalized PageRank seeded on the target and attaches a per-neighbour `relevance`. Default output unchanged.',
+        },
+        tokenBudget: {
+          type: 'number',
+          description: 'Optional (pagerank mode): cap callers+callees to ~this many tokens, keeping highest-relevance neighbours and reporting `omittedForBudget` instead of truncating.',
         },
       },
       required: ['directory', 'functionName'],
