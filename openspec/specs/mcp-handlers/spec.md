@@ -98,6 +98,36 @@ The system SHALL compute intraprocedural control-flow graphs and reaching-defini
 
 > Decision recorded: c8f2b9bf
 > Date: 2026-06-12
+### Requirement: AnchorPersistedMemoryToCallgraphSymbolsWithDeterministicFreshness
+
+The system SHALL anchor persisted memories to call-graph symbols and compute deterministic fresh/drifted/orphaned verdicts on recall without LLM inference.
+
+> Decision recorded: 34b178df
+> Date: 2026-06-16
+### Requirement: CodeanchoredMemoryStoreIsSeparateFromTheDecisionStore
+
+The system SHALL persist agent memories in a dedicated store (.openlore/memory/notes.json) separate from the decision store, and SHALL surface both memory kinds through the recall tool with per-anchor freshness verdicts.
+
+> Decision recorded: 517ab4c6
+> Date: 2026-06-16
+### Requirement: OrphanedMemoriesAreNeverServedAsAuthoritativeContext
+
+The system SHALL The recall tool SHALL partition returned memories into authoritative and needsReanchoring sets, and SHALL never include orphaned memories in the authoritative set.
+
+> Decision recorded: dbe6a95e
+> Date: 2026-06-16
+### Requirement: DecisionsCarryStructuralAnchorsForSelfinvalidation
+
+The system SHALL resolve structural anchors against the call graph when recording a decision, falling back to file-level anchors when no analysis is available.
+
+> Decision recorded: 10e6a55e
+> Date: 2026-06-16
+### Requirement: ValuelevelImpacttraceFallsBackToFunctionGranularityOnIllposedQueriesInsteadOfReportingZero
+
+The system SHALL fall back to function-granularity impact when a value-level query target cannot be resolved in the overlay, reporting applied:false with a reason rather than an empty narrowed result.
+
+> Decision recorded: a37d851f
+> Date: 2026-06-16
 
 ## Decisions
 
@@ -130,3 +160,53 @@ Parse trees are freed per-extractor before later passes (WASM path calls tree.de
 Dogfooding showed the value-level opt-in could silently report zero blast radius when valueReachableLines() returned an empty set — e.g. a mistyped valueParam that matches no parameter/local, or an "all parameters" request on a function the overlay extracted no params for. Zero downstream reads to an agent as "this change is safe," the exact failure value-level must avoid. The handlers now treat a query as well-posed only when its target resolves in the overlay (a named valueParam is a parameter or a tracked def-use variable; an unnamed request needs at least one parameter) and otherwise fall back to the full function-granularity result with an explicit reason, instead of an empty narrowed slice.
 
 **Consequences:** analyze_impact and trace_execution_path return applied:false with a clear reason (and the full blast radius / unrestricted first hop) when the value-level target can't be resolved, rather than a misleading zero. A genuine zero — a real parameter that flows to no callee — is still reported as a sound applied:true narrowing. Regression-tested in graph.test.ts.
+
+### Anchor persisted memory to call-graph symbols with deterministic freshness
+
+**Status:** Approved
+**Date:** 2026-06-16
+**ID:** 34b178df
+
+Every persisted memory (architectural decisions and remember-notes) carries StructuralAnchors resolved against the call graph, and recall computes a fresh/drifted/orphaned verdict from booleans only (symbol existence + content-hash equality) — no LLM, no threshold, no weighted score. This is what code-anchored memory can do that probabilistic vector memory cannot: self-invalidate when the code it describes changes or dies, so recall never serves stale context silently.
+
+**Consequences:** New StructuralAnchor/MemoryFreshness/AnchoredMemory types and a pure anchor engine (decisions/anchor.ts) plus a disk adapter. record_decision now captures anchors. Two new opt-in MCP tools (remember/recall) in a 'memory' preset, kept out of the default/minimal surface. recall enforces a no-silent-stale guarantee (orphaned memories are never authoritative). Notes stored in .openlore/memory, isolated from the decisions gate. Wiring memory-staleness into check_spec_drift and orient is deferred.
+
+### Code-anchored memory store is separate from the decision store
+
+**Status:** Approved
+**Date:** 2026-06-16
+**ID:** 517ab4c6
+
+Memories (durable agent notes) serve a different lifecycle than architectural decisions — they have no commit gate, no consolidation, and no spec-sync. Keeping them in .openlore/memory/notes.json avoids coupling two independent persistence concerns.
+
+**Consequences:** Two distinct stores must be loaded and freshness-checked independently at recall time; recall merges results from both stores into one response so callers see a unified view.
+
+### Orphaned memories are never served as authoritative context
+
+**Status:** Approved
+**Date:** 2026-06-16
+**ID:** dbe6a95e
+
+A memory whose every structural anchor points to deleted or unreachable code cannot be trusted — serving it as fact risks misleading agents into acting on stale assumptions.
+
+**Consequences:** Recall responses partition results into `authoritative` (fresh + drifted) and `needsReanchoring` (orphaned); consumers must not treat needsReanchoring entries as ground truth.
+
+### Decisions carry structural anchors for self-invalidation
+
+**Status:** Approved
+**Date:** 2026-06-16
+**ID:** 10e6a55e
+
+Anchoring decisions to call-graph nodes (not just file paths) lets the system detect when the described code has been refactored or deleted, enabling deterministic staleness detection without LLM inference.
+
+**Consequences:** record_decision now depends on AnchorContext / call-graph data at recording time; if no analysis exists the decision falls back to file-level freshness, which is less precise but not a failure.
+
+### Value-level impact/trace falls back to function granularity on ill-posed queries instead of reporting zero
+
+**Status:** Approved
+**Date:** 2026-06-16
+**ID:** a37d851f
+
+Dogfooding revealed that valueReachableLines() could return an empty set on ill-posed queries (mistyped valueParam, or 'all parameters' on a function with no overlay params), which an agent interprets as 'this change is safe' — the exact failure value-level must avoid. The handlers now validate that the target resolves in the overlay (a named valueParam is a known parameter or tracked def-use variable; an unnamed request needs at least one parameter) and fall back to full function-granularity with an explicit reason when it does not, rather than returning a misleading zero-impact narrowing.
+
+**Consequences:** analyze_impact and trace_execution_path return applied:false with a clear reason (plus the full blast radius / unrestricted first hop) when the value-level target can't be resolved. A genuine zero — a real parameter that flows to no callee — is still reported as applied:true. Regression-tested in graph.test.ts.
