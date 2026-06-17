@@ -245,6 +245,24 @@ describe('CHA — ambiguous cross-file base names', () => {
   // file AND is ambiguous (several classes share it across files), resolution must
   // skip — guessing a global first-match both fabricates a false override edge and
   // steals the real one. Bias: false-negatives over false-positives.
+  it('recovers a cross-file override edge via same-directory resolution (correct twin)', async () => {
+    // Two same-named `Logger` interfaces in different directories, each with an
+    // implementer in a SEPARATE file within its own directory. Same-directory
+    // resolution must wire each implementer to ITS directory's Logger — recovering
+    // the real edge that the bare-name ambiguity-skip would have dropped, without
+    // cross-wiring to the other directory's twin.
+    const b = await new CallGraphBuilder().build([
+      { path: 'a/Logger.ts', content: `export class Logger { log() { return 1; } }`, language: 'TypeScript' },
+      { path: 'a/FileLogger.ts', content: `import { Logger } from './Logger'; export class FileLogger extends Logger { log() { return 2; } }`, language: 'TypeScript' },
+      { path: 'b/Logger.ts', content: `export class Logger { log() { return 9; } }`, language: 'TypeScript' },
+    ]);
+    const aLog = 'a/Logger.ts::Logger.log';
+    const bLog = 'b/Logger.ts::Logger.log';
+    const fileLog = 'a/FileLogger.ts::FileLogger.log';
+    expect(b.edges.some(e => e.synthesizedBy === 'override' && e.callerId === aLog && e.calleeId === fileLog)).toBe(true);
+    expect(b.edges.some(e => e.synthesizedBy === 'override' && e.callerId === bLog && e.calleeId === fileLog)).toBe(false);
+  });
+
   it('does not synthesize an override edge to an ambiguous cross-file base', async () => {
     const b = await new CallGraphBuilder().build([
       { path: 'a.ts', content: `export class Logger { log() { return 1; } }`, language: 'TypeScript' },

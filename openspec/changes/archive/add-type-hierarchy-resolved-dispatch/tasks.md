@@ -95,6 +95,31 @@
 > (`cha.test.ts` Kotlin/PHP/Swift/Scala override + ambiguous-cross-file + Kotlin-qualified-supertype;
 > `graph.test.ts` bfsFromDB DB-path propagation). Full suite green (3762). Languages with CHA hierarchy
 > support: TS/JS, Python, Java, C++, C#, Ruby, Go, Kotlin, PHP, Swift, Scala.
+>
+> **Layered base resolution — recall recovery (follow-up, same PR #155).** Measuring the previous
+> ambiguity-skip on real repos showed it was far too conservative: it dropped a cross-file override
+> edge whenever the base class name was reused ANYWHERE — **~37% of all base-references on Laravel
+> (1,034 of 2,810)**. Replaced the bare same-file-then-skip logic in `buildClassNodes` with layered,
+> most-specific-evidence-first resolution: **(1)** same file → **(2)** the file the child imports the
+> name from (`importMap`, now threaded in — covers Java/TS/JS/Python/Go/Rust/Ruby) → **(3)** unique
+> within the child's directory (same package) → **(4)** globally unique → **(5)** skip (genuinely
+> ambiguous across directories with no import). Layers 1–4 each carry real evidence; only truly
+> unresolvable bases are skipped, preserving the false-negative-over-false-positive bias.
+> Dogfooded:
+> - **DesignPatternsPHP** 71 → 87 override edges: recovered the real `FactoryMethod/Logger`,
+>   `StaticFactory/Formatter`, and `Bridge/Formatter` hierarchies the skip had dropped — each
+>   implementer now resolves to its OWN directory's base — while the cross-namespace false edges stay
+>   gone, and ZERO cross-top-directory edges remain.
+> - **Laravel** (1,640 files): 1,758 override edges, 512 cross-package. An adversarial agent audit of
+>   the riskiest reused names (`Builder`/`Grammar`/`Connection`/`Driver`/`Guard`/`Loader`/… incl. all
+>   6 genuinely globally-ambiguous base names) found **zero false positives** — import resolves the
+>   cross-package `Contracts/*` bases, directory-locality resolves same-namespace siblings (Query vs
+>   Schema `Builder`/`Grammar`), never cross-wiring. Precision held at ~100% with a large recall gain.
+>
+> Residual: a globally-duplicated base name that is neither same-dir-unique NOR import-disambiguated is
+> still skipped (rare; e.g. a non-importMap language using cross-namespace inheritance without same-dir
+> co-location). Tests: +1 (`cha.test.ts` directory-locality recovery resolves to the correct twin).
+> Full suite green (3763).
 
 ## 1. Confirm the surface is purely additive (no type changes)
 - [x] Verify `EdgeConfidence` already includes `'synthesized'` (`call-graph.ts:34`), `CallEdge` already

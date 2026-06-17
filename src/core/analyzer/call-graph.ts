@@ -2905,6 +2905,7 @@ async function extractClassRelationships(
 function buildClassNodes(
   allNodes: Map<string, FunctionNode>,
   relationships: Map<string, { parentClasses: string[]; interfaces: string[] }>,
+  importMap?: ImportMap,
 ): { classes: ClassNode[]; inheritanceEdges: InheritanceEdge[] } {
   // Group FunctionNodes by (filePath, className).
   // Free functions use a synthetic "[basename]" module name keyed by filePath alone.
@@ -2964,19 +2965,33 @@ function buildClassNodes(
   // genuine cross-file inheritance falls back to the global first match.
   const byName = new Map<string, ClassNode>();
   const nameCount = new Map<string, number>();
+  const byNameAndDir = new Map<string, ClassNode[]>(); // `${dir}\0${name}` → classes
+  const dirOf = (p: string): string => { const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(0, i) : ''; };
   for (const cls of classMap.values()) {
     nameCount.set(cls.name, (nameCount.get(cls.name) ?? 0) + 1);
     if (!byName.has(cls.name)) byName.set(cls.name, cls);
+    const dk = `${dirOf(cls.filePath)}\0${cls.name}`;
+    const arr = byNameAndDir.get(dk);
+    if (arr) arr.push(cls); else byNameAndDir.set(dk, [cls]);
   }
+  // Resolve a base/interface NAME to a ClassNode, most-specific evidence first:
+  //   1. same file  2. the file the child imports the name from  3. unique within the
+  //   child's directory (same package)  4. globally unique  5. otherwise SKIP.
+  // Earlier layers carry real evidence (declaration site, import, package); the global-
+  // unique fallback is safe (only one candidate). When the bare name is ambiguous across
+  // directories and no import disambiguates it (e.g. several namespaced `Builder` classes),
+  // skip rather than guess a first-match — false-negatives over false-positives.
   const resolveParent = (parentName: string, childFile: string): ClassNode | undefined => {
     const sameFile = classMap.get(`${childFile}::${parentName}`);
     if (sameFile) return sameFile;
-    // The base is not declared in the child's file and its bare name is AMBIGUOUS
-    // (several classes share it across files — e.g. two unrelated `Logger` interfaces
-    // in different PHP namespaces). A global first-match would both fabricate a false
-    // override edge AND steal the real one from the correct twin, so skip rather than
-    // guess — false-negatives over false-positives.
-    if ((nameCount.get(parentName) ?? 0) > 1) return undefined;
+    const importedFrom = importMap?.get(childFile)?.get(parentName);
+    if (importedFrom) {
+      const viaImport = classMap.get(`${importedFrom}::${parentName}`);
+      if (viaImport) return viaImport;
+    }
+    const sameDir = byNameAndDir.get(`${dirOf(childFile)}\0${parentName}`);
+    if (sameDir && sameDir.length === 1) return sameDir[0];
+    if ((nameCount.get(parentName) ?? 0) > 1) return undefined; // ambiguous across dirs → skip
     return byName.get(parentName);
   };
 
@@ -4764,7 +4779,7 @@ export class CallGraphBuilder {
 
     // Pass 7: Build class hierarchy (inheritance + grouping)
     const relationships = await extractClassRelationships(files);
-    const { classes, inheritanceEdges } = buildClassNodes(allNodes, relationships);
+    const { classes, inheritanceEdges } = buildClassNodes(allNodes, relationships, importMap);
     // Merge IaC module groupings (deduped by id) into the class set.
     const classIds = new Set(classes.map(c => c.id));
     for (const c of iacClasses) if (!classIds.has(c.id)) classes.push(c);

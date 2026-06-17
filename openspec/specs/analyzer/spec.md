@@ -5571,6 +5571,12 @@ The system SHALL skip cross-file parent resolution when the parent name is ambig
 
 > Decision recorded: d5967a48
 > Date: 2026-06-17
+### Requirement: ResolveChaBaseClassesByLayeredEvidenceSamefileImportSamedirectoryGlobaluniqueInsteadOfBarenamethenskip
+
+The system SHALL resolve CHA base-class references using layered evidence (same-file, import, same-directory, global-unique) before falling back to ambiguity-skip.
+
+> Decision recorded: 320bf215
+> Date: 2026-06-17
 
 ## Technical Notes
 
@@ -6068,3 +6074,13 @@ The polymorphic-dispatch (CHA) feature requires class-hierarchy edges for each s
 When multiple classes share a bare name across different files (e.g. two unrelated `Logger` interfaces in different PHP namespaces), a global first-match would fabricate a false override edge and steal the real one from the correct twin; skipping the resolution entirely is safer for downstream dispatch accuracy.
 
 **Consequences:** Some legitimate cross-file inheritance edges will be missed when name collisions exist; this is an acceptable precision-over-recall tradeoff that avoids polluting the call graph with phantom dispatch targets.
+
+### Resolve CHA base classes by layered evidence (same-file → import → same-directory → global-unique) instead of bare-name-then-skip
+
+**Status:** Approved
+**Date:** 2026-06-17
+**ID:** 320bf215
+
+The prior ambiguity-skip in buildClassNodes dropped cross-file override edges whenever the base class name was reused anywhere in the codebase — measured at ~37% of all base-references on Laravel (1034/2810). Replaced with layered, most-specific-evidence-first resolution: (1) class in child's own file; (2) file the child imports the name from via importMap; (3) class unique within child's directory (same package); (4) globally-unique class; (5) skip. Each layer carries real evidence, so only genuinely-ambiguous cross-directory bases with no import are skipped, preserving the false-negatives-over-false-positives bias while recovering legitimate edges.
+
+**Consequences:** Threads the existing importMap into buildClassNodes (new optional param). Recall recovered substantially with no precision loss: DesignPatternsPHP 71→87 override edges, Laravel 1758 override edges / 512 cross-package at ~100% precision. Residual: globally-duplicated base names without import or same-dir co-location are still skipped. True FQCN/namespace extraction for non-importMap languages (PHP/Kotlin/Swift/Scala/C#) remains a future enhancement.
