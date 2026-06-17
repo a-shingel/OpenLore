@@ -1,0 +1,231 @@
+/**
+ * Class Hierarchy Analysis — type-hierarchy-resolved polymorphic dispatch
+ * (spec: add-type-hierarchy-resolved-dispatch). Exercises the override and
+ * virtual-dispatch rules + provenance through the real CallGraphBuilder.build().
+ * Plain .test.ts so CI runs it.
+ */
+import { describe, it, expect } from 'vitest';
+import { CallGraphBuilder, callDistance } from './call-graph.js';
+import type { CallEdge, FunctionNode } from './call-graph.js';
+import { arityFromSignature, CHA_FANOUT_CAP } from './cha.js';
+
+type Built = Awaited<ReturnType<CallGraphBuilder['build']>>;
+
+const build = (content: string): Promise<Built> =>
+  new CallGraphBuilder().build([{ path: 'src/shapes.ts', content, language: 'TypeScript' }]);
+
+/** A method node id by `Class.method` (className-qualified). */
+const methodId = (b: Built, className: string, method: string): string | undefined =>
+  [...b.nodes.values()].find(
+    (n: FunctionNode) => n.className === className && n.name === method,
+  )?.id;
+
+const fnId = (b: Built, name: string): string | undefined =>
+  [...b.nodes.values()].find((n: FunctionNode) => n.className === undefined && n.name === name)?.id;
+
+const edge = (b: Built, fromId?: string, toId?: string): CallEdge | undefined =>
+  b.edges.find(e => e.callerId === fromId && e.calleeId === toId);
+
+const synthEdges = (b: Built): CallEdge[] => b.edges.filter(e => e.confidence === 'synthesized');
+
+describe('CHA — method-level override edges', () => {
+  it('Override edge connects matching methods only', async () => {
+    const b = await build(`
+      class Animal {
+        speak() { return 'a'; }
+        feed() { return 1; }
+      }
+      class Dog extends Animal {
+        speak() { return 'woof'; }
+      }
+    `);
+    const e = edge(b, methodId(b, 'Animal', 'speak'), methodId(b, 'Dog', 'speak'));
+    expect(e).toBeDefined();
+    expect(e!.kind).toBe('overrides');
+    expect(e!.synthesizedBy).toBe('override');
+    expect(e!.confidence).toBe('synthesized');
+    // feed is not overridden by Dog → no override edge to Dog.speak from Animal.feed
+    expect(edge(b, methodId(b, 'Animal', 'feed'), methodId(b, 'Dog', 'speak'))).toBeUndefined();
+    // and no override edge for the un-overridden feed at all
+    expect(b.edges.some(e2 => e2.synthesizedBy === 'override' && e2.callerId === methodId(b, 'Animal', 'feed'))).toBe(false);
+  });
+
+  it('Override edge carries provenance', async () => {
+    const b = await build(`
+      class Base { run() { return 0; } }
+      class Derived extends Base { run() { return 1; } }
+    `);
+    const e = edge(b, methodId(b, 'Base', 'run'), methodId(b, 'Derived', 'run'))!;
+    expect(e.confidence).toBe('synthesized');
+    expect(e.kind).toBe('overrides');
+    expect(e.synthesizedBy).toBe('override');
+  });
+
+  it('Override edges are transitive across a multi-level hierarchy', async () => {
+    const b = await build(`
+      class A { m() { return 0; } }
+      class B extends A { other() { return 1; } }
+      class C extends B { m() { return 2; } }
+    `);
+    // B does not declare m, so A.m must connect directly to C.m (transitive subtree).
+    const e = edge(b, methodId(b, 'A', 'm'), methodId(b, 'C', 'm'));
+    expect(e).toBeDefined();
+    expect(e!.synthesizedBy).toBe('override');
+  });
+
+  it('No silent drop on large class pairs', async () => {
+    // 16 × 16 = 256 > the old >200 cross-product skip threshold.
+    const methods = (n: number, body: string) =>
+      Array.from({ length: n }, (_, i) => `  m${i}() { return ${body}; }`).join('\n');
+    const b = await build(`
+      class Big {
+${methods(16, '0')}
+      }
+      class BigChild extends Big {
+${methods(16, '1')}
+      }
+    `);
+    // Every name-matched override must still be emitted (no silent drop).
+    for (let i = 0; i < 16; i++) {
+      const e = edge(b, methodId(b, 'Big', `m${i}`), methodId(b, 'BigChild', `m${i}`));
+      expect(e, `override edge for m${i}`).toBeDefined();
+      expect(e!.synthesizedBy).toBe('override');
+    }
+    // And precise: Big.m0 is NOT wired to the unrelated BigChild.m1 (no cross-product).
+    expect(edge(b, methodId(b, 'Big', 'm0'), methodId(b, 'BigChild', 'm1'))).toBeUndefined();
+  });
+});
+
+describe('CHA — virtual-dispatch edges', () => {
+  it('Virtual call resolves to all overrides in the receiver subtree', async () => {
+    const b = await build(`
+      class Shape { area() { return 0; } }
+      class Circle extends Shape { area() { return 1; } }
+      class Square extends Shape { area() { return 4; } }
+      function compute(shape: Shape) { return shape.area(); }
+    `);
+    const toCircle = edge(b, fnId(b, 'compute'), methodId(b, 'Circle', 'area'));
+    const toSquare = edge(b, fnId(b, 'compute'), methodId(b, 'Square', 'area'));
+    expect(toCircle, 'edge to Circle.area').toBeDefined();
+    expect(toSquare, 'edge to Square.area').toBeDefined();
+    expect(toCircle!.confidence).toBe('synthesized');
+    expect(toCircle!.synthesizedBy).toBe('cha-declared-type');
+    expect(toCircle!.kind).toBe('calls');
+  });
+
+  it('Declared receiver type narrows the target set', async () => {
+    const b = await build(`
+      class Shape { area() { return 0; } }
+      class Circle extends Shape { area() { return 1; } }
+      class Square extends Shape { area() { return 4; } }
+      function compute(c: Circle) { return c.area(); }
+    `);
+    // An edge to Circle.area exists (direct or synthesized); none to Square.area.
+    const anyToCircle = b.edges.some(e => e.callerId === fnId(b, 'compute') && e.calleeId === methodId(b, 'Circle', 'area'));
+    expect(anyToCircle).toBe(true);
+    expect(edge(b, fnId(b, 'compute'), methodId(b, 'Square', 'area'))).toBeUndefined();
+  });
+
+  it('Unrelated method names produce no edge', async () => {
+    const b = await build(`
+      class Shape { area() { return 0; } }
+      class Circle extends Shape { render() { return 1; } }
+      function compute(shape: Shape) { return shape.area(); }
+    `);
+    expect(edge(b, fnId(b, 'compute'), methodId(b, 'Circle', 'render'))).toBeUndefined();
+  });
+
+  it('Calls on external types do not resolve (method not in hierarchy)', async () => {
+    const b = await build(`
+      class Shape { area() { return 0; } }
+      function f(arr: any) { return arr.map((x: number) => x); }
+    `);
+    // 'map' is declared by no hierarchy class → no virtual-dispatch edge.
+    expect(synthEdges(b).filter(e => e.synthesizedBy?.startsWith('cha-'))).toHaveLength(0);
+  });
+
+  it('Recovered external receiver type emits nothing even when the method name exists', async () => {
+    const b = await build(`
+      class Widget { render() { return 1; } }
+      // arr has a recovered type Array which is NOT a hierarchy class → no edge,
+      // even though Widget declares render.
+      function f(arr: Array) { return (arr as any).render(); }
+    `);
+    expect(b.edges.some(e => e.synthesizedBy?.startsWith('cha-') && e.calleeId === methodId(b, 'Widget', 'render'))).toBe(false);
+  });
+
+  it('Precise and over-approximating dispatch are distinguishable', async () => {
+    const b = await build(`
+      class Shape { area() { return 0; } }
+      class Circle extends Shape { area() { return 1; } }
+      class Square extends Shape { area() { return 4; } }
+      function precise(shape: Shape) { return shape.area(); }
+      function loose(x) { return x.area(); }
+    `);
+    const preciseEdges = b.edges.filter(e => e.callerId === fnId(b, 'precise') && e.synthesizedBy?.startsWith('cha-'));
+    const looseEdges = b.edges.filter(e => e.callerId === fnId(b, 'loose') && e.synthesizedBy?.startsWith('cha-'));
+    expect(preciseEdges.length).toBeGreaterThan(0);
+    expect(preciseEdges.every(e => e.synthesizedBy === 'cha-declared-type')).toBe(true);
+    expect(looseEdges.length).toBeGreaterThan(0);
+    expect(looseEdges.every(e => e.synthesizedBy === 'cha-name-arity')).toBe(true);
+  });
+
+  it('Virtual-dispatch edges cost more than a directly-resolved path', async () => {
+    const b = await build(`
+      class Shape { area() { return 0; } }
+      class Circle extends Shape { area() { return 1; } }
+      class Square extends Shape { area() { return 4; } }
+      function compute(shape: Shape) { return shape.area(); }
+    `);
+    const chaEdge = b.edges.find(e => e.synthesizedBy === 'cha-declared-type')!;
+    const directEdge = b.edges.find(e => e.confidence !== 'synthesized' && e.confidence !== 'external' && Number.isFinite(callDistance(e)))!;
+    expect(callDistance(chaEdge)).toBeGreaterThan(callDistance(directEdge));
+  });
+
+  it('Ubiquitous method name exceeding the cap is dropped, not guessed', async () => {
+    const classes = Array.from({ length: CHA_FANOUT_CAP + 1 }, (_, i) =>
+      `class H${i} { handle() { return ${i}; } }`).join('\n');
+    const b = await build(`
+      ${classes}
+      function dispatch(x) { return x.handle(); }
+    `);
+    // > cap name+arity candidates → the whole call site is dropped.
+    expect(b.edges.some(e => e.callerId === fnId(b, 'dispatch') && e.synthesizedBy === 'cha-name-arity')).toBe(false);
+  });
+
+  it('Unresolvable method emits nothing', async () => {
+    const b = await build(`
+      class Shape { area() { return 0; } }
+      function f(x) { return x.frobnicate(); }
+    `);
+    expect(b.edges.some(e => e.callerId === fnId(b, 'f') && e.synthesizedBy?.startsWith('cha-'))).toBe(false);
+  });
+
+  it('Direct edges are unchanged by CHA synthesis (additive only)', async () => {
+    const b = await build(`
+      class Shape { area() { return 0; } }
+      class Circle extends Shape { area() { return 1; } }
+      function helper() { return 7; }
+      function compute(shape: Shape) { helper(); return shape.area(); }
+    `);
+    // The direct call compute → helper keeps its directly-resolved confidence.
+    const direct = edge(b, fnId(b, 'compute'), fnId(b, 'helper'));
+    expect(direct).toBeDefined();
+    expect(direct!.confidence).not.toBe('synthesized');
+    // Every CHA edge is confidence 'synthesized' — nothing direct was rewritten.
+    for (const e of b.edges.filter(x => x.synthesizedBy?.startsWith('cha-') || x.synthesizedBy === 'override')) {
+      expect(e.confidence).toBe('synthesized');
+    }
+  });
+});
+
+describe('arityFromSignature', () => {
+  it('counts parameters at the top level', () => {
+    expect(arityFromSignature('area()')).toBe(0);
+    expect(arityFromSignature('def speak(self):')).toBe(1);
+    expect(arityFromSignature('add(a: number, b: number): number')).toBe(2);
+    expect(arityFromSignature('public void f(Map<K, V> m, int n)')).toBe(2); // generic comma not counted
+    expect(arityFromSignature(undefined)).toBeUndefined();
+    expect(arityFromSignature('noParens')).toBeUndefined();
+  });
+});

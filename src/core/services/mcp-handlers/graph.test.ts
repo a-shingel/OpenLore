@@ -83,6 +83,58 @@ function makeGraph(nodes: FunctionNode[], edges: CallEdge[]): SerializedCallGrap
 }
 
 // ============================================================================
+// CHA override / virtual-dispatch edges in the adjacency builders
+// (spec: add-type-hierarchy-resolved-dispatch)
+// ============================================================================
+
+describe('CHA edges in adjacency builders', () => {
+  const overrideEdge = (from: string, to: string): CallEdge =>
+    ({ callerId: from, calleeId: to, calleeName: to.split('::')[1] ?? to, confidence: 'synthesized', kind: 'overrides', synthesizedBy: 'override' });
+  const chaCallEdge = (from: string, to: string): CallEdge =>
+    ({ callerId: from, calleeId: to, calleeName: to.split('::')[1] ?? to, confidence: 'synthesized', kind: 'calls', callType: 'method', synthesizedBy: 'cha-declared-type' });
+
+  it('materialized override edges propagate in both directions (replacing the cross-product)', () => {
+    const base = makeNode({ id: 'a.ts::Base.m', className: 'Base' });
+    const derived = makeNode({ id: 'a.ts::Derived.m', className: 'Derived' });
+    const cg = makeGraph([base, derived], [overrideEdge(base.id, derived.id)]);
+    const { forward, backward } = buildAdjacency(cg);
+    expect(forward.get(base.id)!.has(derived.id)).toBe(true);   // base → override
+    expect(backward.get(derived.id)!.has(base.id)).toBe(true);  // override ← base
+  });
+
+  it('strict mode (directResolvedOnly) excludes override and CHA virtual-dispatch edges', () => {
+    const base = makeNode({ id: 'a.ts::Base.m', className: 'Base' });
+    const derived = makeNode({ id: 'a.ts::Derived.m', className: 'Derived' });
+    const caller = makeNode({ id: 'a.ts::caller' });
+    const impl = makeNode({ id: 'a.ts::Impl.area', className: 'Impl' });
+    const cg = makeGraph(
+      [base, derived, caller, impl],
+      [overrideEdge(base.id, derived.id), chaCallEdge(caller.id, impl.id)],
+    );
+    const { forward } = buildAdjacency(cg, { directResolvedOnly: true });
+    expect(forward.get(base.id)!.has(derived.id)).toBe(false);
+    expect(forward.get(caller.id)!.has(impl.id)).toBe(false);
+  });
+
+  it('override edges do not contribute to call distance (excluded from weighted adjacency)', () => {
+    const base = makeNode({ id: 'a.ts::Base.m', className: 'Base' });
+    const derived = makeNode({ id: 'a.ts::Derived.m', className: 'Derived' });
+    const cg = makeGraph([base, derived], [overrideEdge(base.id, derived.id)]);
+    const { forward } = buildWeightedAdjacency(cg);
+    // kind 'overrides' is not a call hop — no weighted edge.
+    expect(forward.get(base.id) ?? []).toHaveLength(0);
+  });
+
+  it('CHA virtual-dispatch (calls-kind) edges DO appear in weighted adjacency', () => {
+    const caller = makeNode({ id: 'a.ts::caller' });
+    const impl = makeNode({ id: 'a.ts::Impl.area', className: 'Impl' });
+    const cg = makeGraph([caller, impl], [chaCallEdge(caller.id, impl.id)]);
+    const { forward } = buildWeightedAdjacency(cg);
+    expect((forward.get(caller.id) ?? []).some(e => e.to === impl.id)).toBe(true);
+  });
+});
+
+// ============================================================================
 // buildAdjacency
 // ============================================================================
 

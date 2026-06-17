@@ -29,6 +29,7 @@ import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
 import { buildFunctionCfg, type FunctionCfg, type CfgNode } from './cfg.js';
 import { stableSymbolId, stableClassId } from '../scip/moniker.js';
+import { synthesizeTypeHierarchyEdges, type RawMethodCall } from './cha.js';
 import { logger } from '../../utils/logger.js';
 
 // ============================================================================
@@ -49,6 +50,7 @@ export type EdgeConfidence =
 /** Broad relationship kind */
 export type EdgeKind =
   | 'calls'
+  | 'overrides'      // base method → overriding method (CHA; spec: add-type-hierarchy-resolved-dispatch)
   | 'tested_by'
   | 'references'
   | 'depends_on'
@@ -4620,6 +4622,46 @@ export class CallGraphBuilder {
     // Merge IaC module groupings (deduped by id) into the class set.
     const classIds = new Set(classes.map(c => c.id));
     for (const c of iacClasses) if (!classIds.has(c.id)) classes.push(c);
+
+    // Pass 7b: CHA — type-hierarchy-resolved polymorphic dispatch
+    // (spec: add-type-hierarchy-resolved-dispatch). Runs after the hierarchy is
+    // built so ClassNode/InheritanceEdge are available. Additive and provenance-
+    // labeled (confidence 'synthesized'); best-effort — never fails the build.
+    // Placed after fanIn/fanOut (Pass 3) and tested_by (Pass 3b) so the heuristic
+    // edges never perturb the directly-resolved structural metrics or tested_by.
+    try {
+      // Direct (non-synthesized) callee ids per caller, so CHA never duplicates a
+      // directly-resolved edge.
+      const directCalleeIdsByCaller = new Map<string, Set<string>>();
+      for (const e of edges) {
+        if (e.confidence === 'synthesized') continue;
+        if (e.kind && e.kind !== 'calls') continue;
+        let s = directCalleeIdsByCaller.get(e.callerId);
+        if (!s) { s = new Set(); directCalleeIdsByCaller.set(e.callerId, s); }
+        s.add(e.calleeId);
+      }
+      // Receiver-based method calls `recv.m()` recovered from the raw edges.
+      const rawMethodCalls: RawMethodCall[] = [];
+      for (const raw of allRawEdges) {
+        if (!raw.calleeObject) continue;
+        rawMethodCalls.push({
+          callerId: raw.callerId,
+          recv: raw.calleeObject,
+          method: raw.calleeName,
+          line: raw.line,
+        });
+      }
+      edges.push(...synthesizeTypeHierarchyEdges({
+        nodes: allNodes,
+        classes,
+        inheritanceEdges,
+        rawMethodCalls,
+        fileContents,
+        directCalleeIdsByCaller,
+      }));
+    } catch {
+      // CHA is best-effort; a failure must never abort the build.
+    }
 
     // Pass 8: Content-addressed stable ids (change: add-content-addressed-stable-symbol-ids).
     // Pure post-pass over the fully-built node set — keeps the per-language
