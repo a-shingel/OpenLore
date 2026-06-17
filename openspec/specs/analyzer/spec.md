@@ -5359,6 +5359,12 @@ caller can trade completeness for certainty.
 - **WHEN** reachability is computed
 - **THEN** synthesized edges are not traversed and a symbol reachable only through them is treated as
   unreached
+### Requirement: LengthpreservingMaskingOfPythonNoncodeRegionsBeforeRouteExtraction
+
+The system SHALL mask Python triple-quoted strings and line comments length-preservingly before route-pattern matching so that character offsets remain byte-aligned with the original source.
+
+> Decision recorded: 65d4ac12
+> Date: 2026-06-17
 
 ## Technical Notes
 
@@ -5806,3 +5812,13 @@ Common JPA patterns place annotations inline with the field (e.g. `@Id private L
 Retrofit interfaces use identically-named @GET/@POST/@Path annotations from retrofit2.http, which are client request templates, not server endpoints. Without checking the import package, the parser would emit phantom server routes for HTTP client definitions.
 
 **Consequences:** JAX-RS routes are only detected when the file imports from javax.ws.rs or jakarta.ws.rs; projects using non-standard JAX-RS re-exports would not be recognized. Retrofit and similar HTTP client interfaces are correctly excluded.
+
+### Length-preserving masking of Python non-code regions before route extraction
+
+**Status:** Approved
+**Date:** 2026-06-17
+**ID:** 65d4ac12
+
+Route-matching regexes use character offsets (m.index) that are resolved to line numbers via getLine(), which measures against original line lengths. Stripping comments changed string length and could drift line numbers. Additionally, triple-quoted docstrings can contain route-like patterns (e.g. Flask's sansio/scaffold.py code-block examples) that produced false-positive route matches. Length-preserving masking keeps byte alignment while eliminating both failure modes.
+
+**Consequences:** Over-masking (e.g. unmatched triple-quotes) can only drop potential matches, never invent them, consistent with the false-negatives-over-false-positives bias. Any future non-code region handling in route extraction must preserve string length or getLine() will produce wrong line numbers.
