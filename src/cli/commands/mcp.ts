@@ -504,11 +504,11 @@ export const TOOL_DEFINITIONS = [
         changedSymbols: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Changed function/method names. Provide this OR diffRef.',
+          description: 'Changed function/method names. Optional — if neither this nor diffRef is given, defaults to your current working-tree changes vs HEAD.',
         },
         diffRef: {
           type: 'string',
-          description: 'Git ref to diff the working tree against (e.g. "HEAD", "main"). Provide this OR changedSymbols.',
+          description: 'Git ref to diff the working tree against (e.g. "HEAD", "main"). Optional — defaults to HEAD when neither this nor changedSymbols is given.',
         },
         maxDepth: { type: 'number', description: 'Backward reachability depth (default 12)' },
         directResolvedOnly: { type: 'boolean', description: 'Traverse only directly-resolved edges, ignoring synthesized dynamic-dispatch edges (default false).' },

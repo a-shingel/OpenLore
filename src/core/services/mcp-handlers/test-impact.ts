@@ -95,30 +95,39 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
   const maxDepth = Math.max(1, Math.min(input.maxDepth ?? 12, SUBGRAPH_MAX_DEPTH_LIMIT));
 
   // ── Resolve the changed set ────────────────────────────────────────────────
+  // Precedence: explicit changedSymbols → diffRef → default to the working-tree
+  // diff vs HEAD. The default matters for weak tool-callers (e.g. a local model
+  // in Pi) that invoke select_tests with NO arguments: rather than erroring,
+  // a bare call answers the most common intent — "which tests cover my current
+  // uncommitted changes?". The result flags that it defaulted, so it's never
+  // mysterious.
+  const hasSymbols = !!(input.changedSymbols && input.changedSymbols.length > 0);
+  const baseRef = input.diffRef && input.diffRef.length > 0 ? input.diffRef : 'HEAD';
+  const defaultedToHead = !hasSymbols && (input.diffRef === undefined || input.diffRef === '');
+
   let seeds: FunctionNode[] = [];
   let changedFiles: string[] = [];
-  if (input.changedSymbols && input.changedSymbols.length > 0) {
-    seeds = seedsFromSymbols(cg, input.changedSymbols);
-  } else if (input.diffRef !== undefined) {
+  if (hasSymbols) {
+    seeds = seedsFromSymbols(cg, input.changedSymbols!);
+  } else {
     try {
       const { getChangedFiles } = await import('../../drift/git-diff.js');
-      const diff = await getChangedFiles({ rootPath: absDir, baseRef: input.diffRef || 'HEAD', includeUnstaged: true });
+      const diff = await getChangedFiles({ rootPath: absDir, baseRef, includeUnstaged: true });
       changedFiles = diff.files.map(f => f.path);
       seeds = seedsFromFiles(cg, changedFiles);
     } catch (err) {
-      return { error: `git diff failed: ${err instanceof Error ? err.message : String(err)}` };
+      return { error: `git diff failed (base ${baseRef}): ${err instanceof Error ? err.message : String(err)}` };
     }
-  } else {
-    return { error: 'Provide changedSymbols (a list of names) or diffRef (a git ref to diff against).' };
   }
 
   if (seeds.length === 0) {
     return {
       changed: changedFiles,
       selectedTests: [],
-      message: input.diffRef !== undefined
-        ? 'No changed production functions matched the call graph. The diff may touch only non-code files, or analyze_codebase is stale.'
-        : 'No matching production functions found for the given symbols.',
+      message: hasSymbols
+        ? 'No matching production functions found for the given symbols.'
+        : `No changed production functions vs ${baseRef}${defaultedToHead ? ' (defaulted — no changedSymbols or diffRef was given)' : ''}. Nothing has changed, the diff touches only non-code files, or analyze_codebase is stale.`,
+      ...(defaultedToHead ? { note: 'Called without changedSymbols/diffRef — diffed the working tree against HEAD. Pass changedSymbols or diffRef to target a specific change.' } : {}),
       soundness: { posture: 'over-approximate', caveats: ['No seeds resolved — nothing to select.'] },
       coverage: { languages: [], testDetection: 'none' as const },
     };
@@ -236,11 +245,10 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
   }
 
   return {
-    changed: input.changedSymbols && input.changedSymbols.length > 0
-      ? seeds.map(s => s.name)
-      : changedFiles,
+    changed: hasSymbols ? seeds.map(s => s.name) : changedFiles,
     seeds: seeds.map(s => ({ name: s.name, file: s.filePath })),
     selectedTests,
+    ...(defaultedToHead ? { note: 'No changedSymbols/diffRef given — selected tests for your current working-tree changes vs HEAD.' } : {}),
     soundness: { posture: 'over-approximate' as const, caveats },
     coverage: { languages: seedLangs, testDetection },
   };

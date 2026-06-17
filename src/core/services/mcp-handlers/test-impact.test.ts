@@ -11,8 +11,13 @@ vi.mock('./utils.js', () => ({
   readCachedContext: vi.fn(),
 }));
 
+vi.mock('../../drift/git-diff.js', () => ({
+  getChangedFiles: vi.fn(async () => ({ files: [] })),
+}));
+
 import { handleSelectTests, seedsFromSymbols, seedsFromFiles } from './test-impact.js';
 import { readCachedContext } from './utils.js';
+import { getChangedFiles } from '../../drift/git-diff.js';
 import type { FunctionNode, SerializedCallGraph, CallEdge } from '../../analyzer/call-graph.js';
 
 function node(over: Partial<FunctionNode> & { id: string }): FunctionNode {
@@ -89,9 +94,23 @@ describe('handleSelectTests', () => {
     expect(r.soundness.caveats.join(' ')).toMatch(/no tests were detected/i);
   });
 
-  it('errors when neither changedSymbols nor diffRef is given', async () => {
-    const r = await handleSelectTests({ directory: '/p' }) as { error: string };
-    expect(r.error).toMatch(/changedSymbols|diffRef/);
+  it('defaults to a working-tree diff vs HEAD when no args are given, and flags it', async () => {
+    vi.mocked(getChangedFiles).mockResolvedValueOnce({ files: [{ path: 'src/foo.ts' }] } as never);
+    const r = await handleSelectTests({ directory: '/p' }) as {
+      selectedTests: Array<{ test: string }>; note?: string;
+    };
+    // src/foo.ts changed → seeds foo+bar → both tests reach the change.
+    expect(r.selectedTests.map(t => t.test).sort()).toEqual(['testBar', 'testFoo']);
+    expect(getChangedFiles).toHaveBeenCalledWith(expect.objectContaining({ baseRef: 'HEAD' }));
+    expect(r.note).toMatch(/HEAD/);
+  });
+
+  it('flags the default in the empty-diff message when no args and no changes', async () => {
+    vi.mocked(getChangedFiles).mockResolvedValueOnce({ files: [] } as never);
+    const r = await handleSelectTests({ directory: '/p' }) as { selectedTests: unknown[]; message?: string; note?: string };
+    expect(r.selectedTests).toEqual([]);
+    expect(r.message).toMatch(/defaulted/);
+    expect(r.note).toMatch(/HEAD/);
   });
 
   it('returns a message (not a false-empty) when symbols match no production function', async () => {
