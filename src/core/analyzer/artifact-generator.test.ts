@@ -277,6 +277,63 @@ describe('AnalysisArtifactGenerator', () => {
       }
     });
 
+    it('does not leak source file extensions into entity names (#138)', async () => {
+      const javaFiles: ScoredFile[] = [
+        createScoredFile({ name: 'VetController.java', path: 'src/main/java/com/acme/vet/VetController.java', directory: 'src/main/java/com/acme/vet', score: 70 }),
+        createScoredFile({ name: 'VetRepository.java', path: 'src/main/java/com/acme/vet/VetRepository.java', directory: 'src/main/java/com/acme/vet', score: 65 }),
+      ];
+      const repoMap = createMockRepoMap({
+        highValueFiles: javaFiles,
+        allFiles: javaFiles,
+        clusters: {
+          byDirectory: { 'src/main/java/com/acme/vet': javaFiles },
+          byDomain: { vet: javaFiles },
+          byLayer: { presentation: javaFiles, business: [], data: [], infrastructure: [] },
+        },
+      });
+      const depGraph = createMockDepGraph();
+
+      const artifacts = await generateArtifacts(repoMap, depGraph, {
+        rootDir: tempDir,
+        outputDir,
+      });
+
+      const vetDomain = artifacts.repoStructure.domains.find(d => d.name === 'vet');
+      expect(vetDomain).toBeDefined();
+      expect(vetDomain!.entities).toContain('VetController');
+      expect(vetDomain!.entities).toContain('VetRepository');
+      for (const entity of vetDomain!.entities) {
+        expect(entity).not.toMatch(/Java$/);
+      }
+    });
+
+    it('excludes package-info/module-info marker files from entities (#138)', async () => {
+      const files: ScoredFile[] = [
+        createScoredFile({ name: 'TypeToken.java', path: 'src/main/java/com/acme/reflect/TypeToken.java', directory: 'src/main/java/com/acme/reflect', score: 70 }),
+        createScoredFile({ name: 'package-info.java', path: 'src/main/java/com/acme/reflect/package-info.java', directory: 'src/main/java/com/acme/reflect', score: 40 }),
+        createScoredFile({ name: 'module-info.java', path: 'src/main/java/module-info.java', directory: 'src/main/java', score: 40 }),
+      ];
+      const repoMap = createMockRepoMap({
+        highValueFiles: files,
+        allFiles: files,
+        clusters: {
+          byDirectory: { 'src/main/java/com/acme/reflect': files },
+          byDomain: { reflect: files },
+          byLayer: { presentation: files, business: [], data: [], infrastructure: [] },
+        },
+      });
+
+      const artifacts = await generateArtifacts(repoMap, createMockDepGraph(), {
+        rootDir: tempDir,
+        outputDir,
+      });
+
+      const reflect = artifacts.repoStructure.domains.find(d => d.name === 'reflect');
+      expect(reflect?.entities).toContain('TypeToken');
+      expect(reflect?.entities).not.toContain('PackageInfo');
+      expect(reflect?.entities).not.toContain('ModuleInfo');
+    });
+
     it('should generate entry points', async () => {
       const repoMap = createMockRepoMap();
       const depGraph = createMockDepGraph();

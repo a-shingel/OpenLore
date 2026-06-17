@@ -496,10 +496,12 @@ function extractNextJavaMethodName(lines: string[], annotationLine: number): str
     const l = lines[i] ?? '';
     // Skip further annotation lines
     if (l.trim().startsWith('@')) continue;
-    // Match `[modifiers] ReturnType methodName(` — return type can include
-    // generics, arrays, and dotted names.
+    // Match `[modifiers] [@Annotation...] ReturnType methodName(` — return type
+    // can include generics, arrays, and dotted names. Annotations may sit in the
+    // return-type position (e.g. Spring's `public @ResponseBody Vets list()`),
+    // so allow and skip them — otherwise the handler name resolves to "unknown".
     const match = l.match(
-      /\b(?:public|private|protected)\s+(?:static\s+|final\s+|abstract\s+|synchronized\s+|default\s+|native\s+)*(?:<[^>]+>\s+)?[\w<>[\], ?.]+?\s+(\w+)\s*\(/
+      /\b(?:public|private|protected)\s+(?:static\s+|final\s+|abstract\s+|synchronized\s+|default\s+|native\s+)*(?:@[\w.]+(?:\([^)]*\))?\s+)*(?:<[^>]+>\s+)?[\w<>[\], ?.]+?\s+(\w+)\s*\(/
     );
     if (match && !skipNames.has(match[1])) return match[1];
   }
@@ -551,7 +553,14 @@ export async function extractJavaRouteDefinitions(filePath: string): Promise<Rou
   }
 
   const isSpring = /@(?:Rest)?Controller\b|@(?:Get|Post|Put|Delete|Patch)Mapping\b|@RequestMapping\b/.test(clean);
-  const isJaxrs = /@Path\b/.test(clean) && /@(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b/.test(clean);
+  // JAX-RS server annotations come from javax/jakarta.ws.rs. Require that import
+  // so we don't mistake an HTTP CLIENT library for a server: Retrofit interfaces
+  // use identically-named @GET/@POST/@Path from retrofit2.http (client request
+  // templates, not server endpoints) and would otherwise yield phantom routes.
+  const hasJaxrsImport = /\bimport\s+(?:static\s+)?(?:javax|jakarta)\.ws\.rs\b/.test(clean);
+  const isJaxrs = hasJaxrsImport
+    && /@Path\b/.test(clean)
+    && /@(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b/.test(clean);
 
   // ── Spring: shorthand mappings (@GetMapping, @PostMapping, …) ──────────────
   if (isSpring) {
