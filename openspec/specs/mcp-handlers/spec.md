@@ -270,6 +270,12 @@ stay silent rather than emit a false-positive marker.
 
 > Decision recorded: 08e71184
 > Date: 2026-06-18
+### Requirement: ExcludeAllOpenloreprefixedDirsFromTheProjectFingerprintSoOpenloresOwnCachesDontInvalidateTheAnalysisCache
+
+The system SHALL exclude all directories whose name starts with `.openlore` from project fingerprint computation so that OpenLore-managed caches do not invalidate analysis freshness.
+
+> Decision recorded: cd5ff82c
+> Date: 2026-06-18
 
 ## Decisions
 
@@ -432,3 +438,13 @@ recall previously ranked memories by binary substring token-overlap, which silen
 Every conclusion tool (analyze_impact, find_path, find_dead_code, get_subgraph, select_tests, trace_execution_path, recall) carries a deterministic `confidenceBoundary` computed from data already present: edge `confidence`/`synthesizedBy` provenance for the basis, synthesized-edge reliance for known-unknowable crossings, and the project fingerprint + git diff for staleness. The shape is categorical labels and counts (directEdges, synthesizedEdges, synthesizedByRule, knownUnknowable[], staleness, complete) — never a blended confidence number and never an LLM call, preserving the north-star (c6d1ad07). It is additive metadata: a caller that ignores it sees today's answer unchanged.
 
 **Consequences:** A new shared module src/core/services/mcp-handlers/confidence-boundary.ts owns the type and computation; seven conclusion handlers each spread a `confidenceBoundary` field into their response. analyze.ts's fingerprint.json gains an optional `commit` field (captured via git rev-parse at analyze time) so the staleness marker can name the build commit; staleness degrades gracefully (no commit / non-git repo → fingerprint-mismatch boolean without a commit name). `complete` is false whenever the computation leaned on a synthesized edge, crossed a known-unknowable boundary, or ran against a stale index — the answer-level NoFalseCompleteness contract.
+
+### Exclude all .openlore-prefixed dirs from the project fingerprint so OpenLore's own caches don't invalidate the analysis cache
+
+**Status:** Approved
+**Date:** 2026-06-18
+**ID:** cd5ff82c
+
+computeProjectFingerprint walked .openlore-live-cache (the gitignored clone cache for live-data fixtures). Those foreign source files churn whenever the live-data MCP tools or integration tests run, so the content hash flapped even when the user's own source was unchanged — forcing needless full re-analysis and false staleness markers. Generalizing the directory skip from exact `.openlore` to any `.openlore`-prefixed name covers `.openlore`, `.openlore-live-cache`, and future OpenLore-managed dirs in one rule.
+
+**Consequences:** walkForFingerprint now skips directories whose name starts with `.openlore` in addition to the static FINGERPRINT_SKIP_DIRS set. The custom OPENLORE_LIVE_CACHE_DIR override (an arbitrary path) is not covered by the prefix rule — acceptable since the default is the in-repo `.openlore-live-cache`. A regression test asserts live-cache churn leaves the fingerprint unchanged while a real user-source edit still flips the hash.
