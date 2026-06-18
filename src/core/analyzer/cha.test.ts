@@ -201,6 +201,29 @@ describe('CHA — virtual-dispatch edges', () => {
     expect(b.edges.some(e => e.callerId === fnId(b, 'f') && e.synthesizedBy?.startsWith('cha-'))).toBe(false);
   });
 
+  it('declared-type dispatch resolves a cross-directory same-name base via the caller import', async () => {
+    // Two `Shape` hierarchies in different directories. The caller takes a `Shape` it
+    // imports from its OWN dir, so polymorphic `s.area()` must dispatch only into THAT
+    // Shape's subtree (a/Circle) — not the same-named decoy hierarchy in b/ (b/Square).
+    // Without import disambiguation the declared-type path unioned every same-named type's
+    // subtree under the precise `cha-declared-type` label (the NestJS dogfood finding:
+    // false-positive precise edges to wrong-directory same-named classes).
+    const b = await new CallGraphBuilder().build([
+      { path: 'a/shape.ts', content: `export class Shape { area() { return 0; } }`, language: 'TypeScript' },
+      { path: 'a/circle.ts', content: `import { Shape } from './shape'; export class Circle extends Shape { area() { return 1; } }`, language: 'TypeScript' },
+      { path: 'b/shape.ts', content: `export class Shape { area() { return 9; } }`, language: 'TypeScript' },
+      { path: 'b/square.ts', content: `import { Shape } from './shape'; export class Square extends Shape { area() { return 4; } }`, language: 'TypeScript' },
+      { path: 'a/compute.ts', content: `import { Shape } from './shape'; export function compute(s: Shape) { return s.area(); }`, language: 'TypeScript' },
+    ]);
+    const compute = 'a/compute.ts::compute';
+    // Precise dispatch into the imported Shape's subtree.
+    const toCircle = b.edges.find(e => e.callerId === compute && e.calleeId === 'a/circle.ts::Circle.area');
+    expect(toCircle?.synthesizedBy).toBe('cha-declared-type');
+    // No precise edge leaks into the wrong-directory same-named hierarchy.
+    expect(b.edges.some(e => e.callerId === compute && e.calleeId === 'b/square.ts::Square.area')).toBe(false);
+    expect(b.edges.some(e => e.callerId === compute && e.calleeId === 'b/shape.ts::Shape.area')).toBe(false);
+  });
+
   it('Direct edges are unchanged by CHA synthesis (additive only)', async () => {
     const b = await build(`
       class Shape { area() { return 0; } }

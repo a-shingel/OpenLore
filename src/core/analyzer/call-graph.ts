@@ -4850,6 +4850,7 @@ export class CallGraphBuilder {
         rawMethodCalls,
         fileContents,
         directCalleeIdsByCaller,
+        importMap: baseImportMap,
       }));
     } catch {
       // CHA is best-effort; a failure must never abort the build.
