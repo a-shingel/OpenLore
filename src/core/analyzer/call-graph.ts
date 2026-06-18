@@ -2337,9 +2337,18 @@ const KOTLIN_SPEC: QueryLangSpec = {
   language: 'Kotlin',
   loader: () => loadGrammarSoft('Kotlin', () => import('tree-sitter-kotlin'), m => m.default),
   classTypes: new Set(['class_declaration', 'object_declaration', 'interface_declaration', 'companion_object']),
-  // Extension functions: `fun Foo.bar()` — receiver user_type becomes the className.
+  // Extension functions: `fun Foo.bar()` — the receiver user_type becomes the className.
+  // The receiver is the user_type that appears BEFORE the function name. A user_type
+  // AFTER the name is the return type, and parameter types are nested inside
+  // function_value_parameters — neither is a receiver. Picking the first user_type
+  // unconditionally mis-filed a plain `fun f(x: Int): Int` under a phantom class `Int`
+  // (and surfaced `Int`/`String`/`T` as classes). Only a true receiver counts.
   extraClassName: (fnNode) => {
-    const receiver = fnNode.namedChildren.find(c => c.type === 'user_type');
+    const nameNode = fnNode.namedChildren.find(c => c.type === 'simple_identifier');
+    if (!nameNode) return undefined;
+    const receiver = fnNode.namedChildren.find(
+      c => c.type === 'user_type' && c.endIndex <= nameNode.startIndex,
+    );
     return receiver?.text;
   },
   fnQuery: `
