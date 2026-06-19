@@ -10,13 +10,18 @@
  * TypedMemoryClassification, ChangedSinceRecall, and ContentAnchorDedup.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EdgeStore } from '../edge-store.js';
-import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../../constants.js';
+import {
+  OPENLORE_DIR,
+  OPENLORE_ANALYSIS_SUBDIR,
+  OPENLORE_MEMORY_SUBDIR,
+  MEMORY_NOTES_FILE,
+} from '../../../constants.js';
 import { handleRemember, handleRecall } from './memory.js';
 import type { FunctionNode } from '../../analyzer/call-graph.js';
 
@@ -92,6 +97,19 @@ type RecallResult = {
 
 const fooAnchor = [{ symbol: 'foo', file: 'src/foo.ts' }];
 const barAnchor = [{ symbol: 'bar', file: 'src/bar.ts' }];
+const fooFileAnchor = [{ file: 'src/foo.ts' }]; // file-level only — no symbol resolves a nodeId
+
+/** Path to the raw memory store, for simulating legacy records written by older versions. */
+function notesPath(): string {
+  return join(root, OPENLORE_DIR, OPENLORE_MEMORY_SUBDIR, MEMORY_NOTES_FILE);
+}
+
+/** Strip `validFromCommit` from every persisted note, simulating a pre-bitemporal store. */
+async function stripValidFromCommit(): Promise<void> {
+  const store = JSON.parse(await readFile(notesPath(), 'utf-8'));
+  for (const m of store.memories) delete m.validFromCommit;
+  await writeFile(notesPath(), JSON.stringify(store, null, 2) + '\n', 'utf-8');
+}
 
 // ── BitemporalMemoryValidity ──────────────────────────────────────────────────
 
@@ -153,6 +171,46 @@ describe('supersession and asOf recall', () => {
     const rec = (await handleRecall(root)) as RecallResult;
     expect(rec.authoritative.map((m) => m.id)).toContain(r.id);
   });
+
+  it('a successful supersede names the retired id in its message', async () => {
+    await commitAll('c1');
+    const m1 = (await handleRemember(root, 'cache is write-through', fooAnchor)) as RememberResult;
+    const m2 = (await handleRemember(root, 'cache switched to write-back', fooAnchor, undefined, undefined, m1.id)) as RememberResult;
+    expect(m2.message).toMatch(new RegExp(`Superseded prior memory ${m1.id}`));
+  });
+
+  it('superseding an already-invalidated memory records without re-retiring it', async () => {
+    await commitAll('c1');
+    const m1 = (await handleRemember(root, 'gen 1', fooAnchor)) as RememberResult;
+    await handleRemember(root, 'gen 2', fooAnchor, undefined, undefined, m1.id); // retires m1
+    const m3 = (await handleRemember(root, 'gen 3', fooAnchor, undefined, undefined, m1.id)) as RememberResult;
+    expect(m3.message).toMatch(/not found or already invalidated/i);
+    const rec = (await handleRecall(root)) as RecallResult;
+    expect(rec.authoritative.map((m) => m.id)).toContain(m3.id);
+  });
+
+  it('a self-supersede (identical content+anchor) is an in-place update, not a false retirement', async () => {
+    await commitAll('c1');
+    const m1 = (await handleRemember(root, 'foo fact', fooAnchor)) as RememberResult;
+    // Re-record identical content+anchor while pointing supersedes at the same (computed) id.
+    const m2 = (await handleRemember(root, 'foo fact', fooAnchor, undefined, undefined, m1.id)) as RememberResult;
+    expect(m2.id).toBe(m1.id);
+    expect(m2.message).toMatch(/same memory|updated in place|nothing retired/i);
+    expect(m2.message).not.toMatch(/now invalidated/i);
+    const rec = (await handleRecall(root)) as RecallResult;
+    expect(rec.total).toBe(1);
+    // The surviving record is authoritative (fresh, not invalidated), not retired history.
+    expect(rec.authoritative.map((m) => m.id)).toContain(m1.id);
+  });
+
+  it('asOf excludes a memory recorded after the asOf commit', async () => {
+    const c1 = await commitAll('c1');
+    await writeFile(join(root, 'NOTES.md'), 'x\n', 'utf-8');
+    await commitAll('c2');
+    const later = (await handleRemember(root, 'recorded at c2', fooAnchor)) as RememberResult;
+    const asOf = (await handleRecall(root, undefined, 10, undefined, c1)) as RecallResult;
+    expect(asOf.authoritative.map((m) => m.id)).not.toContain(later.id);
+  });
 });
 
 // ── DeterministicContradictionSurfacing ──────────────────────────────────────
@@ -181,6 +239,15 @@ describe('unreconciled contradiction surfacing', () => {
     await handleRemember(root, 'about foo', fooAnchor);
     await handleRemember(root, 'about bar', barAnchor);
     const rec = (await handleRecall(root)) as RecallResult;
+    expect(rec.unreconciled).toBeUndefined();
+  });
+
+  it('two memories on the same FILE (no symbol anchor) are not unreconciled', async () => {
+    await commitAll('c1');
+    await handleRemember(root, 'about the foo file', fooFileAnchor);
+    await handleRemember(root, 'also about the foo file', fooFileAnchor);
+    const rec = (await handleRecall(root)) as RecallResult;
+    // file-level anchors are too coarse to count as a contradiction.
     expect(rec.unreconciled).toBeUndefined();
   });
 });
@@ -222,6 +289,44 @@ describe('changedSince recall', () => {
     expect(ids).toContain(m2.id);
     expect(ids).not.toContain(m1.id);
   });
+
+  it('is exclusive of the commit itself: a memory recorded AT the commit is excluded', async () => {
+    const c1 = await commitAll('c1');
+    const m1 = (await handleRemember(root, 'recorded at c1', fooAnchor)) as RememberResult;
+    expect(m1.validFromCommit).toBe(c1);
+    const rec = (await handleRecall(root, undefined, 10, undefined, undefined, c1)) as RecallResult;
+    expect(rec.authoritative.map((m) => m.id)).not.toContain(m1.id);
+  });
+
+  it('surfaces a memory invalidated after the commit, flagged invalidated', async () => {
+    const c1 = await commitAll('c1');
+    const m1 = (await handleRemember(root, 'gen 1', fooAnchor)) as RememberResult;
+    await writeFile(join(root, 'NOTES.md'), 'x\n', 'utf-8');
+    await commitAll('c2'); // m1's invalidation will be stamped with c2 (a descendant of c1)
+    await handleRemember(root, 'gen 2', barAnchor, undefined, undefined, m1.id);
+    const rec = (await handleRecall(root, undefined, 10, undefined, undefined, c1)) as RecallResult;
+    const m1Item = rec.authoritative.find((m) => m.id === m1.id);
+    expect(m1Item).toBeDefined();
+    expect(m1Item!.invalidated).toBe(true);
+  });
+});
+
+// ── legacy (pre-bitemporal) records under temporal filters ───────────────────
+
+describe('legacy memory without validFromCommit', () => {
+  it('is always-valid under asOf and absent under changedSince', async () => {
+    const c1 = await commitAll('c1');
+    const m1 = (await handleRemember(root, 'legacy fact', fooAnchor)) as RememberResult;
+    await stripValidFromCommit(); // simulate a record written before the bitemporal field existed
+
+    // asOf: no valid-time marker ⇒ treated as recorded-before any commit ⇒ in scope.
+    const asOf = (await handleRecall(root, undefined, 10, undefined, c1)) as RecallResult;
+    expect(asOf.authoritative.map((m) => m.id)).toContain(m1.id);
+
+    // changedSince: no record/invalidation commit to place on the axis ⇒ not "changed since".
+    const since = (await handleRecall(root, undefined, 10, undefined, undefined, c1)) as RecallResult;
+    expect(since.authoritative.map((m) => m.id)).not.toContain(m1.id);
+  });
 });
 
 // ── ContentAnchorDedup ───────────────────────────────────────────────────────
@@ -243,5 +348,35 @@ describe('content + anchor dedup', () => {
     expect(a.id).not.toBe(b.id);
     const rec = (await handleRecall(root)) as RecallResult;
     expect(rec.total).toBe(2);
+  });
+});
+
+// ── graceful degradation of invalid temporal / type inputs ───────────────────
+
+describe('invalid recall filters degrade gracefully (warn, do not throw or over-filter)', () => {
+  beforeEach(async () => {
+    await commitAll('c1');
+    await handleRemember(root, 'foo fact', fooAnchor);
+    await handleRemember(root, 'bar fact', barAnchor);
+  });
+
+  it('an unresolvable asOf is ignored with a warning, returning the full set', async () => {
+    const rec = (await handleRecall(root, undefined, 10, undefined, 'no-such-ref')) as RecallResult;
+    expect(rec.total).toBe(2);
+    expect(rec.asOf).toBeUndefined();
+    expect(rec.note).toMatch(/asOf .*did not resolve/i);
+  });
+
+  it('an unresolvable changedSince is ignored with a warning, returning the full set', async () => {
+    const rec = (await handleRecall(root, undefined, 10, undefined, undefined, 'no-such-ref')) as RecallResult;
+    expect(rec.total).toBe(2);
+    expect(rec.changedSince).toBeUndefined();
+    expect(rec.note).toMatch(/changedSince .*did not resolve/i);
+  });
+
+  it('an unknown type filter is ignored with a warning, returning the full set', async () => {
+    const rec = (await handleRecall(root, undefined, 10, undefined, undefined, undefined, 'banana')) as RecallResult;
+    expect(rec.total).toBe(2);
+    expect(rec.note).toMatch(/not a known memory type/i);
   });
 });

@@ -83,10 +83,16 @@ export async function handleRemember(
     const validFromCommit = await getHeadCommit(rootPath);
 
     const recordedAt = new Date().toISOString();
+    // Identity is content + resolved anchors, so re-recording the same fact about the
+    // same code updates in place (content-anchor dedup) instead of accumulating.
+    const id = makeMemoryId(content.trim(), anchors);
+    // A self-supersede (supersedes resolves to this same id — i.e. identical content+anchor)
+    // is incoherent: there is nothing to retire and history would not be preserved. Drop the
+    // supersede intent and treat it as the plain in-place update it actually is.
+    const validSupersede = supersedes && supersedes !== id ? supersedes : undefined;
+
     const memory: AnchoredMemory = {
-      // Identity is content + resolved anchors, so re-recording the same fact about the
-      // same code updates in place (content-anchor dedup) instead of accumulating.
-      id: makeMemoryId(content.trim(), anchors),
+      id,
       kind: 'note',
       content: content.trim(),
       anchors,
@@ -94,18 +100,16 @@ export async function handleRemember(
       tags: tags?.length ? tags : undefined,
       type: normalizeMemoryType(type),
       ...(validFromCommit ? { validFromCommit } : {}),
-      ...(supersedes ? { supersedes } : {}),
+      ...(validSupersede ? { supersedes: validSupersede } : {}),
     };
 
     // CAS update so concurrent remember calls never lose a write: the id-keyed
     // upsert is re-applied to the latest store on a write conflict. When `supersedes`
     // names a prior memory, mark it invalidated (it leaves the authoritative set per
     // the memory-integrity invariant, but stays queryable via `asOf` for history).
-    let supersededFound = false;
-    await updateMemoryStore(rootPath, (store) => {
+    const finalStore = await updateMemoryStore(rootPath, (store) => {
       const memories = store.memories.map((m) => {
-        if (supersedes && m.id === supersedes && !m.invalidatedAt) {
-          supersededFound = true;
+        if (validSupersede && m.id === validSupersede && !m.invalidatedAt) {
           return {
             ...m,
             invalidatedAt: recordedAt,
@@ -120,11 +124,19 @@ export async function handleRemember(
       };
     });
 
-    const supersedeNote = supersedes
-      ? supersededFound
-        ? `Superseded prior memory ${supersedes} (now invalidated; queryable via asOf).`
-        : `supersedes target "${supersedes}" was not found or already invalidated — recorded without retiring it.`
-      : undefined;
+    // Derive the outcome from the committed store rather than a closure side-effect, so the
+    // reported result is the one that actually persisted regardless of CAS execution count.
+    const supersededFound = !!validSupersede && finalStore.memories.some(
+      (m) => m.id === validSupersede && m.invalidatedAt === recordedAt,
+    );
+
+    const supersedeNote = !supersedes
+      ? undefined
+      : supersedes === id
+        ? `supersedes target "${supersedes}" is this same memory (identical content+anchor) — updated in place, nothing retired.`
+        : supersededFound
+          ? `Superseded prior memory ${supersedes} (now invalidated; queryable via asOf).`
+          : `supersedes target "${supersedes}" was not found or already invalidated — recorded without retiring it.`;
 
     return {
       id: memory.id,

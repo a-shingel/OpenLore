@@ -41,10 +41,28 @@
   re-assertion semantics, not a regression: explicitly re-stating a fact makes it current again. It
   only surfaces when the same store is reused across runs; unit tests use fresh temp stores.
 
+## Follow-up review fixes (2026-06-18, post-implementation)
+
+A correctness/coverage pass over the diff surfaced two issues, both fixed in this PR:
+
+1. **Literal NUL byte in `makeMemoryId`** (`memory-store.ts`) — the dedup hash used a raw `\x00`
+   delimiter written as a literal control byte, which made git treat the whole file as **binary**
+   (no diff, no blame, renders as "Binary file" on GitHub). Replaced with the `\x00` escape sequence;
+   runtime-identical (template literals decode `\x00` to the same NUL char, so existing ids are
+   unchanged), source is text again.
+2. **Self-supersede reported a false retirement** (`memory.ts`) — calling `remember` with
+   `supersedes` set to the memory's own (re-)computed id (identical content+anchor) invalidated then
+   immediately overwrote the same record, yet returned "now invalidated; queryable via asOf." Now
+   guarded: a self-supersede is reported honestly as an in-place update with nothing retired. Also
+   hardened `supersededFound` to derive from the committed store rather than a closure side-effect.
+
+Both confirmed against the **built** handlers on a real repo (self-supersede now returns
+`"…is this same memory (identical content+anchor) — updated in place, nothing retired."`).
+
 ## Verification gates
 
-- `vitest run src examples` → **3,906 passed, 2 skipped** (incl. `bitemporal-memory.test.ts` 12 cases
+- `vitest run src examples` → **3,917 passed, 2 skipped** (incl. `bitemporal-memory.test.ts` 23 cases
   + the orient contradiction case).
 - `eslint src` → clean. `tsc --noEmit` → clean.
-- tools/list payload budget (spec-28): full surface 55,645 B < the bumped 57,000 B ceiling; default
+- tools/list payload budget (spec-28): full surface < the bumped 57,000 B ceiling; default
   and `minimal` surfaces unchanged (no new tool).
