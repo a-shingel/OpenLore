@@ -137,4 +137,77 @@ describe('analyzeAgentTranscript', () => {
   it('returns all-zero on an empty transcript', () => {
     expect(analyzeAgentTranscript({ toolUses: [], toolResults: [] })).toEqual({ fileReadOps: 0, fileReadTokens: 0, certifiedFacts: 0 });
   });
+
+  it('counts a read with no paired result as an op but adds 0 read-tokens (truncated transcript)', () => {
+    const t = { toolUses: [{ id: 'orphan', name: 'Read', input: { file_path: 'src/a.ts' } }], toolResults: [] };
+    expect(analyzeAgentTranscript(t)).toEqual({ fileReadOps: 1, fileReadTokens: 0, certifiedFacts: 0 });
+  });
+
+  it('on a duplicate tool_result for one id, the later result wins (Map semantics)', () => {
+    const t = {
+      toolUses: [{ id: 'u1', name: 'Read', input: {} }],
+      toolResults: [{ toolUseId: 'u1', text: 'aa' }, { toolUseId: 'u1', text: 'bbbbbbbb' }], // 2 vs 8 chars
+    };
+    expect(analyzeAgentTranscript(t).fileReadTokens).toBe(estimateTokens('bbbbbbbb'));
+  });
+});
+
+describe('parseAgentOutput — tool_result content shapes', () => {
+  const userResult = (toolUseId: string, content: unknown) =>
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: toolUseId, content }] } });
+
+  it('flattens an array of {type:text} parts (the common Claude Code shape)', () => {
+    const lines = [
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'u1', name: 'Read', input: { file_path: 'a.ts' } }] } }),
+      userResult('u1', [{ type: 'text', text: 'export ' }, { type: 'text', text: 'const x = 1' }]),
+    ].join('\n');
+    const { transcript } = parseAgentOutput(lines);
+    expect(transcript.toolResults[0].text).toBe('export const x = 1');
+    expect(analyzeAgentTranscript(transcript).fileReadTokens).toBe(estimateTokens('export const x = 1'));
+  });
+
+  it('falls back to JSON for a non-text content part, never throwing', () => {
+    const { transcript } = parseAgentOutput(userResult('u1', [{ type: 'image', source: { kind: 'b64' } }]));
+    expect(transcript.toolResults[0].text).toContain('image');
+  });
+});
+
+describe('countVerifiedCurrent on a real recall payload shape', () => {
+  // Fixture captured from a real `recall` run (mcp.ts serializes with JSON.stringify(…, null, 2));
+  // pins the metric to the actual `verifiedCurrent` key so a recall-shape change breaks the test,
+  // not the benchmark silently.
+  const recallJson = `{
+  "authoritative": [
+    {
+      "content": "processPayment must stay pure",
+      "verifiedCurrent": true,
+      "certificates": [ { "symbol": "processPayment", "filePath": "pay.ts", "contentHash": "e8b6dfcb0709f2af" } ]
+    },
+    {
+      "content": "a drifted note",
+      "freshness": "drifted"
+    }
+  ]
+}`;
+  it('counts exactly the verified-current facts in a recall result', () => {
+    expect(countVerifiedCurrent(recallJson)).toBe(1);
+  });
+  it('a recall result with a verified-current fact lifts certifiedFacts through analyzeAgentTranscript', () => {
+    const lines = [
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'u1', name: 'mcp__openlore__recall', input: { task: 'pay' } }] } }),
+      JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'u1', content: recallJson }] } }),
+    ].join('\n');
+    expect(analyzeAgentTranscript(parseAgentOutput(lines).transcript).certifiedFacts).toBe(1);
+  });
+});
+
+describe('parseAgentOutput — legacy single-object variants', () => {
+  it('recognizes a legacy object with `result` but no `usage`', () => {
+    const legacy = JSON.stringify({ result: 'done', total_cost_usd: 0.01, num_turns: 2 });
+    const { transcript, result } = parseAgentOutput(legacy);
+    expect(transcript.toolUses).toHaveLength(0);
+    expect(result).toBeDefined();
+    expect(result!.answer).toBe('done');
+    expect(result!.freshInputTokens).toBe(0); // no usage block
+  });
 });

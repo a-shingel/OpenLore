@@ -45,10 +45,10 @@ import type { MemoryFreshness, AnchoredMemory } from '../../../types/index.js';
 export interface Reversal {
   /** Where the reverted record came from. `note` marks an omission placeholder. */
   source: 'memory' | 'decision' | 'note';
-  /** Id of the reverted memory/decision (empty for a `note` placeholder). */
-  id: string;
-  /** The reverted approach: the old memory content or decision title. */
-  what: string;
+  /** Id of the reverted memory/decision. Absent on a `note` placeholder. */
+  id?: string;
+  /** The reverted approach: the old memory content or decision title. Absent on a `note`. */
+  what?: string;
   /** Recorded reason for the reversal (the superseding item's content/rationale). */
   reason?: string;
   /** Reverting commit SHA — present only for memory reversals (invalidatedByCommit). */
@@ -520,6 +520,19 @@ export async function handleOrient(
     // ── ReversalAwareness (do-not-repeat) ──────────────────────────────────
     // The absence of a do-not-repeat signal is what lets an agent re-introduce
     // an approach a prior agent/human already tried and reverted. Surface it.
+    //
+    // Reversal scope is the TASK's scope ONLY: files the search surfaced, plus the
+    // files of decisions relevant to the task by domain/file. Deliberately NOT
+    // `scopeFiles` — that set also absorbs the files of every `approved` decision
+    // (the always-surface-for-sync rule, line 471), which would leak a reverted
+    // decision/memory on an unrelated approved-decision's file into this task.
+    const revScopeFiles = new Set<string>(relevantFileSet);
+    for (const d of store.decisions) {
+      const taskRelevant =
+        d.affectedDomains.some((dom) => relevantDomainSet.has(dom)) ||
+        d.affectedFiles.some((f) => relevantFileSet.has(f));
+      if (taskRelevant) for (const f of d.affectedFiles) revScopeFiles.add(f);
+    }
     const rev: Reversal[] = [];
     // Memory reversals: a retired (invalidated) memory whose anchors fall in
     // scope. The reverting commit is invalidatedByCommit; the reason is the
@@ -529,7 +542,7 @@ export async function handleOrient(
     for (const n of memStoreAll.memories) if (n.supersedes) supersederByTarget.set(n.supersedes, n);
     for (const m of memStoreAll.memories) {
       if (!m.invalidatedAt) continue;
-      if (!m.anchors.some((a) => scopeFiles.has(a.filePath))) continue;
+      if (!m.anchors.some((a) => revScopeFiles.has(a.filePath))) continue;
       const by = supersederByTarget.get(m.id);
       rev.push({
         source: 'memory',
@@ -552,7 +565,7 @@ export async function handleOrient(
       if (!a) continue;
       const inScope =
         a.affectedDomains.some((dom) => relevantDomainSet.has(dom)) ||
-        a.affectedFiles.some((f) => scopeFiles.has(f));
+        a.affectedFiles.some((f) => revScopeFiles.has(f));
       if (!inScope) continue;
       rev.push({
         source: 'decision',
@@ -571,10 +584,10 @@ export async function handleOrient(
       const MAX_REVERSALS = 10;
       reversals = rev.slice(0, MAX_REVERSALS);
       if (rev.length > MAX_REVERSALS) {
+        // Omission placeholder — no id/what so a `find(x => x.id === …)` consumer
+        // can't match it; the warning carries the count.
         reversals.push({
           source: 'note',
-          id: '',
-          what: '',
           warning: `${rev.length - MAX_REVERSALS} more reverted item(s) in scope not shown — query recall for the full history.`,
         });
       }

@@ -664,7 +664,7 @@ history) and omitted entirely when nothing in scope was reverted.
 
 - **GIVEN** an approach recorded and later reverted at commit Y with a reason
 - **WHEN** an agent orients on the code that approach touched
-- **THEN** the briefing's `reversals` warns "Do not re-attempt …; reverted at commit Y — recorded reason …", rather than omitting it
+- **THEN** the briefing's `reversals` warns "Do not re-attempt … (reverted at commit Y) — recorded reason: …", rather than omitting it
 
 #### Scenario: Reverted intent is never served as authoritative
 

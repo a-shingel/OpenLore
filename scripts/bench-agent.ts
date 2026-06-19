@@ -36,7 +36,7 @@ interface Opts {
   out: string;
   maxBudgetUsd: number;
   skipSetup: boolean;
-  withFullTools: boolean;   // WITH exposes all ~45 tools instead of a lean preset
+  withFullTools: boolean;   // WITH exposes all ~60 tools instead of a lean preset
   withPreset: string;       // lean tool preset for the WITH arm (default: navigation)
   leanOrient: boolean;      // instruct the WITH arm to call orient with lean:true (Spec 27)
 }
@@ -68,7 +68,7 @@ function parseArgs(argv: string[]): Opts {
 }
 
 // ── Metrics ─────────────────────────────────────────────────────────────────
-// Tokens are broken out because the WITH condition loads ~45 MCP tool
+// Tokens are broken out because the WITH condition loads ~60 MCP tool
 // definitions into the system prompt every call: that shows up as a large but
 // CHEAP cached-read component, so a single lumped "tokens" number flatters
 // WITHOUT and is misleading. `costUsd` is the honest bottom line (it prices
@@ -143,7 +143,7 @@ function localCli(): string {
 
 function writeMcpConfigs(work: string, opts: { fullTools: boolean; preset: string }): { openlore: string; empty: string } {
   // WITH = openlore as recommended. By default a lean **--preset** (navigation:
-  // 7 graph-traversal tools) rather than the full ~45 — the MCP best-practice
+  // 7 graph-traversal tools) rather than the full ~60 — the MCP best-practice
   // that tool schemas for tools the agent never calls are pure per-request
   // overhead. `--with-full-tools` exposes all 45 for the overhead comparison.
   const cli = localCli();
@@ -353,7 +353,7 @@ function renderReport(
   L.push('');
   L.push(`- **Agent:** \`claude -p --output-format stream-json\`, model \`${opts.model}\`, ${opts.runs} run(s)/task, median reported. The transcript stream is parsed for the re-read economy below; usage/cost come from the terminal \`result\` event.`);
   L.push(`- **Isolation:** both arms run with \`--strict-mcp-config\` so the agent uses ONLY the config we pass (a globally-registered openlore can't leak into the baseline). Same as CodeGraph's published benchmark.`);
-  L.push(`- **Conditions:** WITHOUT = empty MCP config (grep/read tools only) — the baseline. WITH = openlore (the repo's **local build**): \`openlore mcp --no-watch-auto ${opts.withFullTools ? '' : '--preset ' + opts.withPreset}\` (${opts.withFullTools ? 'all ~45 tools' : `**--preset ${opts.withPreset}** — a lean graph-navigation surface, the MCP best-practice of not paying schema overhead for tools the agent never calls`}), repo pre-analyzed with \`openlore analyze --no-embed\`, **plus** a system-prompt instruction to call \`orient()\` before reading files (a faithful mirror of the shipped \`openlore-orient\` skill — measures the product, not tools the agent ignores).`);
+  L.push(`- **Conditions:** WITHOUT = empty MCP config (grep/read tools only) — the baseline. WITH = openlore (the repo's **local build**): \`openlore mcp --no-watch-auto ${opts.withFullTools ? '' : '--preset ' + opts.withPreset}\` (${opts.withFullTools ? 'all ~60 tools' : `**--preset ${opts.withPreset}** — a lean graph-navigation surface, the MCP best-practice of not paying schema overhead for tools the agent never calls`}), repo pre-analyzed with \`openlore analyze --no-embed\`, **plus** a system-prompt instruction to call \`orient()\` before reading files (a faithful mirror of the shipped \`openlore-orient\` skill — measures the product, not tools the agent ignores).`);
   L.push('- **Scoring:** correct = the agent\'s final answer contains every independently-verifiable expected substring (`expect.mustInclude` in `bench-agent.tasks.ts`), confirmed against the pinned source by grep — not derived from openlore\'s own graph.');
   L.push('- **Metrics:** **cost (USD)** is the bottom line (it prices fresh vs cached tokens correctly). Tokens are broken into *fresh* input (`input_tokens` + cache creation — what the model processed fresh) and *cached* reads (`cache_read_input_tokens` — ~10× cheaper); plus output, round-trips (`num_turns`), wall-clock.');
   L.push('');
