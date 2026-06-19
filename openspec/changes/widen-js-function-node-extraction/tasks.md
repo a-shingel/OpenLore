@@ -60,8 +60,10 @@
 - Arity/`signatureShape` may be empty for named/anonymous function-expression assignments whose inner
   name differs from the assigned member (`app.use = function use(...)`); the `stableId` stays valid,
   just less precise. Member-assigned **arrows** get full arity.
-- `async` on assignment nodes follows the existing `fnNode.text` heuristic (the same under-detection
-  already present for arrow `const`s); not changed here.
+- `async` is now read from the captured arrow/function-expression RHS (`@fn.value`), not from the
+  enclosing assignment/declaration/field text. `exports.h = async function(){}`, `x = async () => {}`,
+  `var load = async () => {}`, and the pre-existing `const f = async () => {}` arm all set `isAsync`
+  correctly. Plain `async function`/`async` method declarations (no value capture) still read `fnNode`.
 - `this.x = fn` inside a class body associates with the enclosing class name.
 - Object-literal `pair` values (`{ prop: function(){} }`) remain out of scope; only assignment,
   `var`/`const`/`let` bindings, and class-field arrow/function members are added.
@@ -69,3 +71,20 @@
   `f = function(){}` in two scopes) collapse to one node under the existing id-keyed last-wins de-dup,
   and their out-edges merge onto the survivor. This is a pre-existing property of the id scheme (two
   nested `function helper(){}` collapse the same way) — not introduced here, not widened in severity.
+
+## Inbound reachability of the new nodes
+Indexing a member node is only half of reachability — calls must also resolve *into* it.
+- **Resolved (added here):** a same-file call with a literal receiver matching the node's dotted name,
+  `app.render()` → `app.render`, now resolves to the internal node (confidence `same_file`) via exact
+  id lookup, instead of falling through to a synthetic `external::app.render` leaf. This makes the
+  feature's reachability/dead-code claim true for the literal-receiver idiom and is what the change's
+  own `app.use → app.lazyrouter` test actually exercises.
+- **NOT resolved (pre-existing, out of scope — call-extraction layer, not this change):** intra-object
+  `this.method()` calls — the dominant sibling-call idiom in real CommonJS/prototype code (Express
+  calls `this.set()`, `this.enabled()`). The TS/JS call query captures `member_expression` with an
+  `(identifier)` object; `this` is a `this` node, so `this.x()` is not captured as an edge **for any
+  TS/JS code, including ordinary ES6 classes** (`class C { a(){ this.b() } }` yields no `a → b` edge).
+  Widening the call query to capture `this`-receiver calls is a separate change with repo-wide edge-set
+  blast radius and should be proposed, dogfooded, and decided on its own.
+- **NOT resolved (out of scope):** cross-file member calls and instance-receiver prototype dispatch
+  (`view.render()` → `View.prototype.render`).

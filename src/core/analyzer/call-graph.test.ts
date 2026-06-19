@@ -389,6 +389,150 @@ describe('CallGraphBuilder — class-field arrow/function members', () => {
 });
 
 // ---------------------------------------------------------------------------
+// JavaScript/TypeScript — widen-js extraction: adversarial boundaries
+// (change: widen-js-function-node-extraction — exclusion shapes the PR body
+//  claims "by construction" but the first cut left untested, plus the async-
+//  metadata correctness that the captured RHS value node now drives.)
+// ---------------------------------------------------------------------------
+
+describe('CallGraphBuilder — widen-js exclusion boundaries', () => {
+  it('does NOT index a computed-member assignment `obj[key] = function(){}`', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'lib/dyn.js',
+      language: 'JavaScript',
+      content: `obj[key] = function(){}; function real(){}`,
+    }]);
+    // subscript_expression LHS is not a member_expression — excluded by construction.
+    expect(nodeNames(result)).toEqual(['real']);
+  });
+
+  it('does NOT index an augmented assignment `obj.x ||= function(){}`', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'lib/aug.js',
+      language: 'JavaScript',
+      content: `obj.x ||= function(){}; obj.y = function(){}; function real(){}`,
+    }]);
+    // augmented_assignment_expression is a distinct node type — only the plain `=` matches.
+    expect(nodeNames(result)).toEqual(['obj.y', 'real']);
+  });
+
+  it('indexes only the inner binding of a chained `exports.a = exports.b = function(){}`', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'lib/chain.js',
+      language: 'JavaScript',
+      content: `exports.a = exports.b = function(){};`,
+    }]);
+    // The outer assignment's RHS is another assignment_expression, not a function — only inner matches.
+    expect(nodeNames(result)).toEqual(['exports.b']);
+  });
+
+  it('does NOT index a private class field `#handler = () => {}`', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/priv.ts',
+      language: 'TypeScript',
+      content: `class C { #secret = () => {}; pub = () => {}; }`,
+    }]);
+    // #-prefixed fields are private_property_identifier, not property_identifier.
+    expect(nodeNames(result)).toEqual(['pub']);
+  });
+
+  it('collapses a member LHS split across lines to a stable dotted name', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'lib/wrap.js',
+      language: 'JavaScript',
+      content: `app\n  .use = function(){};`,
+    }]);
+    expect(nodeNames(result)).toContain('app.use');
+  });
+
+  it('resolves an inbound call to a member-assigned method', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'lib/inbound.js',
+      language: 'JavaScript',
+      content: `
+        app.render = function render(){};
+        app.boot = function boot(){ app.render(); };
+      `,
+    }]);
+    expect(edgePairs(result)).toContain('app.boot→app.render');
+    expect(fanIn(result, 'app.render')).toBe(1);
+    // The edge must land on the real internal node, not a synthetic external leaf.
+    const renderId = 'lib/inbound.js::app.render';
+    expect(result.edges.some(e => e.calleeId === renderId)).toBe(true);
+    expect(result.nodes.has('external::app.render')).toBe(false);
+  });
+
+  it('does NOT fabricate a member edge when no dotted node matches', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'lib/nomatch.js',
+      language: 'JavaScript',
+      content: `
+        app.boot = function boot(){ redisClient.get('k'); };
+        app.use = function use(){};
+      `,
+    }]);
+    // redisClient.get has no internal dotted node — must stay an external leaf,
+    // and must not spuriously resolve onto an unrelated member node.
+    expect(fanIn(result, 'app.use')).toBe(0);
+    expect(result.nodes.has('external::redisClient.get')).toBe(true);
+  });
+});
+
+describe('CallGraphBuilder — widen-js async metadata (RHS value node)', () => {
+  it('marks an async member-assigned function isAsync', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'lib/h.js',
+      language: 'JavaScript',
+      content: `exports.handler = async function(){};`,
+    }]);
+    expect(Array.from(result.nodes.values()).find(n => n.name === 'exports.handler')?.isAsync).toBe(true);
+  });
+
+  it('marks an async class-field arrow isAsync', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/c.ts',
+      language: 'TypeScript',
+      content: `class C { run = async () => {}; idle = () => {}; }`,
+    }]);
+    expect(Array.from(result.nodes.values()).find(n => n.name === 'run')?.isAsync).toBe(true);
+    // a non-async sibling field stays false — async must come from the RHS, not the class.
+    expect(Array.from(result.nodes.values()).find(n => n.name === 'idle')?.isAsync).toBe(false);
+  });
+
+  it('marks an async var-bound arrow isAsync and leaves a sync one false', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'lib/v.js',
+      language: 'JavaScript',
+      content: `var load = async () => {}; var parse = () => {};`,
+    }]);
+    expect(Array.from(result.nodes.values()).find(n => n.name === 'load')?.isAsync).toBe(true);
+    expect(Array.from(result.nodes.values()).find(n => n.name === 'parse')?.isAsync).toBe(false);
+  });
+
+  it('still marks a plain `async function` declaration and `async` method isAsync', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/keep.ts',
+      language: 'TypeScript',
+      content: `async function fetchIt(){} class C { async load(){} sync(){} }`,
+    }]);
+    expect(Array.from(result.nodes.values()).find(n => n.name === 'fetchIt')?.isAsync).toBe(true);
+    expect(Array.from(result.nodes.values()).find(n => n.name === 'load')?.isAsync).toBe(true);
+    expect(Array.from(result.nodes.values()).find(n => n.name === 'sync')?.isAsync).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Python
 // ---------------------------------------------------------------------------
 

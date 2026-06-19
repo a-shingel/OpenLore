@@ -5652,6 +5652,18 @@ The system SHALL index class fields bound to arrow or function expressions as na
 
 > Decision recorded: efcd981c
 > Date: 2026-06-19
+### Requirement: ResolveSamefileMembermethodCallsToTheirDottednameNodesViaExactIdLookup
+
+The system SHALL resolve same-file member-method calls to their dotted-name call-graph nodes via exact id lookup before falling back to type inference or external resolution.
+
+> Decision recorded: 527e0f1f
+> Date: 2026-06-19
+### Requirement: DetectAsyncFromTheCapturedRhsValueNodeForBindingassignmentfieldFunctions
+
+The system SHALL detect the async keyword from the RHS value node of binding, assignment, and class-field function expressions rather than from the enclosing statement node.
+
+> Decision recorded: 1a926c8a
+> Date: 2026-06-19
 
 ## Technical Notes
 
@@ -6209,3 +6221,23 @@ The TS/JS extractor's TS_FN_QUERY matched only function_declaration, exported fu
 Class fields bound to an arrow or function expression (`class C { handler = () => {} }`) are the dominant modern handler idiom, but the widen-js-function-node-extraction change (decision d8b81a9b) covered only assignment_expression and var/const/let bindings — leaving this common shape invisible to the call graph. Adding a public_field_definition arm to TS_FN_QUERY closes the one common idiom the original widening did not reach.
 
 **Consequences:** One additional TS_FN_QUERY arm. The field is named by its bare property identifier (`handler`) and associated with the enclosing class via the existing className walk, exactly mirroring method_definition (id `File::Class.handler`). Private (`#`) fields stay unindexed, consistent with method_definition which also matches only property_identifier. Non-function field values are excluded because the value is constrained to arrow/function. Extends d8b81a9b; does not supersede it.
+
+### Resolve same-file member-method calls to their dotted-name nodes via exact id lookup
+
+**Status:** Approved
+**Date:** 2026-06-19
+**ID:** 527e0f1f
+
+The widen-js change indexes member-assigned functions (e.g. `app.render = function(){}`) as dotted-name nodes (`filePath::app.render`), but the edge resolver had no strategy to match calls like `app.render()` to these nodes — they fell through to synthetic `external::app.render` leaves, leaving the real internal nodes unreachable at fanIn 0. A new deterministic strategy performs exact id lookup (`${filePath}::${object}.${name}`) in the same file before falling back to type inference or external resolution. Direct id lookup is exact and local with no heuristic false positives; cross-file and instance-receiver cases are intentionally left to existing strategies.
+
+**Consequences:** Same-file member methods now accrue real inbound edges and fanIn, so reachability, impact analysis, and dead-code detection see them. Cross-file member calls and instance-receiver prototype calls (e.g. `view.render` → `View.prototype.render`) remain out of scope.
+
+### Detect async from the captured RHS value node for binding/assignment/field functions
+
+**Status:** Approved
+**Date:** 2026-06-19
+**ID:** 1a926c8a
+
+The widen-js node shapes (member assignment, var/const/let binding, class field) set the FunctionNode whose text starts with `exports.`/`var`/`const`/the field name, so the prior async heuristic (`fnNode.children async` || `fnNode.text.startsWith('async ')`) returned false for every async member/binding/field. The extraction already captures the arrow/function-expression RHS as `@fn.value`; async detection now reads that value node when present, falling back to fnNode only for `function_declaration`/`method_definition` arms that carry `async` directly.
+
+**Consequences:** isAsync is now correct for async member-assigned, var-bound, const/let-bound, and class-field arrow/function nodes. No behavior change for plain function/method declarations. The analyzer spec's known-limitation on async for these shapes is superseded.
