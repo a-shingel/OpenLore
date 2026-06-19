@@ -7,7 +7,7 @@
 > `federation` preset + `federation_status` tool. Group 4 (fleet-level anchored
 > memory) is DEFERRED — it depends on bitemporal memory (`add-bitemporal-typed-memory-operations`,
 > PR #163) which is not yet in `main`. Decisions: `bf5aff2d` (registry schema),
-> `e0e7709f` (cross-repo resolution contract).
+> `67ca60fe` (cross-repo resolution contract).
 > Phase-2 set (build after the five memory + dispatch changes):
 > `add-multi-repo-federation` · `add-confidence-boundary-disclosure` ·
 > `add-structural-claim-verification` · `add-preflight-blast-radius-guard` ·

@@ -13,7 +13,7 @@
  * No merged graph: each repo's index is loaded lazily, on demand, via the same
  * `readCachedContext` used for single-repo queries.
  *
- * See decisions bf5aff2d (registry) + e0e7709f (resolution contract).
+ * See decisions bf5aff2d (registry) + 67ca60fe (resolution contract).
  */
 
 import { resolve } from 'node:path';

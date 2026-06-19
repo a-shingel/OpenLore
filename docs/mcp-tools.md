@@ -199,6 +199,16 @@ Most tools run on **pure static analysis** — no LLM quota consumed. Exceptions
 | `reject_decision` | Reject a decision by ID with a reason. Rejected decisions are excluded from sync. | No |
 | `sync_decisions` | Write approved decisions into OpenSpec spec.md files (as requirements) and create ADR files in `openspec/decisions/`. Append-only — never rewrites existing content. After sync, inactive decisions (synced/rejected/phantom) are purged from the store — their content lives in ADRs and git. Pass `dryRun: true` to preview. | No |
 
+**Federation (multi-repo, opt-in)**
+
+Registered only under `openlore mcp --preset federation`. Federation is an index-of-indexes: each repo keeps its own `.openlore` index, referenced by a project-local registry (`openlore federation add`). No merged graph is built.
+
+| Tool | Description | Requires prior analysis |
+|------|-------------|:---:|
+| `federation_status` | Report the federation registry and each registered repo's live index state (`indexed` / `stale` / `unindexed` / `missing`), with registered-vs-live fingerprints. Read-only. | No |
+
+When a registry exists, `analyze_impact`, `find_dead_code`, `select_tests`, and `find_path` accept opt-in `federation` (boolean) and `federationRepos` (name list) params: cross-repo consumers, live-via-federation exports, cross-repo test selection, and cross-repo producer/bridge location respectively. Each response names `reposConsulted` / `reposSkipped` — unindexed/stale repos are reported, never guessed.
+
 **Story Management**
 
 | Tool | Description | Requires prior analysis |

@@ -5,7 +5,7 @@
 > and the cross-repo resolution contract (API contract), per `CLAUDE.md`.
 >
 > STATUS (2026-06-19): groups 1–3 + 5 IMPLEMENTED on `feat/multi-repo-federation`; group 4 DEFERRED
-> (needs bitemporal memory, PR #163, not yet in main). Decisions `bf5aff2d`, `e0e7709f`.
+> (needs bitemporal memory, PR #163, not yet in main). Decisions `bf5aff2d`, `67ca60fe`.
 
 ## 1. Federation registry (foundation)
 - [x] Define a registry manifest: per-repo `{ path|remote, fingerprint, schemaVersion, lastBuilt }`.

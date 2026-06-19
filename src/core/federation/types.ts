@@ -8,7 +8,7 @@
  * queries load only the per-repo indexes they need, on demand.
  *
  * See: openspec/changes/add-multi-repo-federation and decisions bf5aff2d (registry
- * schema) + e0e7709f (cross-repo resolution contract).
+ * schema) + 67ca60fe (cross-repo resolution contract).
  */
 
 /** Current registry manifest schema version. Bumped on a breaking shape change. */

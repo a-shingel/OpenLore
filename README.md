@@ -461,6 +461,15 @@ openlore manifest validate .well-known/openlore.json
 
 The manifest captures the public API surface, HTTP routes, stats, dependencies, and spec state in a [versioned schema](schemas/openlore-manifest-v1.json). A future OpenLore federation index will read these manifests across many repos to answer cross-repo `orient()` questions, staying a thin merger rather than a giant analyzer. See [docs/federation.md](docs/federation.md).
 
+A first deterministic slice of that index-of-indexes already ships. Each repo keeps its own independently-built `.openlore` index; a project-local registry references them and federated queries load only what they need — no merged graph is ever materialized:
+
+```bash
+openlore federation add ../billing-service --name billing   # register a peer repo's index
+openlore federation list                                     # ✓ indexed / ⚠ stale / ∅ unindexed
+```
+
+Once peers are registered, `analyze_impact`, `find_dead_code`, `select_tests`, and `find_path` take an opt-in `federation` flag and answer across the fleet — who consumes a published symbol, whether an export is dead *everywhere*, which consumer tests a change touches — always naming the repos consulted vs skipped, never guessing for an unindexed one. The capability is opt-in: `openlore mcp --preset federation`. See [docs/cli-reference.md](docs/cli-reference.md#federation-multi-repo).
+
 ---
 
 ## Documentation
