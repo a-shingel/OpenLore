@@ -166,4 +166,30 @@ describe('findCrossRepoTests', () => {
     const res = await findCrossRepoTests(scope, ['farewell']);
     expect(res.tests).toHaveLength(0);
   });
+
+  // Regression: the real analyzer associates a test file with the production it
+  // covers via an import-based `tested_by` edge — NOT a test *function* node that
+  // calls the production (an inline `it(...)` block produces no callable symbol).
+  // The federated walker must honor tested_by like the single-repo handler, else a
+  // genuinely-tested consumer selects nothing across the repo boundary.
+  it('selects a consumer test associated only by a tested_by edge (no test call node)', async () => {
+    // Consumer where welcome → greet (external) and welcome is covered by a
+    // tested_by edge to a test file — with no test node and no test→welcome call.
+    const welcome = node('src/app.ts::welcome', 'welcome', 'src/app.ts');
+    const greetExt = node('external::greet', 'greet', 'external', { isExternal: true });
+    const testedByEdge: CallEdge = {
+      callerId: 'src/app.ts::welcome', calleeId: 'src/app.test.ts::app.test',
+      calleeName: 'app.test', confidence: 'name_only', kind: 'tested_by',
+    };
+    const consumerTb = makeRepoIndex('consumer-tb', [welcome], [edge('src/app.ts::welcome', 'external::greet', 'greet', 'external')], {
+      nodes: [welcome, greetExt],
+      edges: [edge('src/app.ts::welcome', 'external::greet', 'greet', 'external'), testedByEdge],
+    });
+    addRepo(producer, consumerTb, { name: 'consumer-tb' });
+    const scope = resolveFederationScope(producer, { federation: true });
+    const res = await findCrossRepoTests(scope, ['greet']);
+    const tb = res.tests.filter(t => t.repo === 'consumer-tb');
+    expect(tb).toHaveLength(1);
+    expect(tb[0]).toMatchObject({ repo: 'consumer-tb', test: { name: 'app.test', file: 'src/app.test.ts' }, viaSymbol: 'greet' });
+  });
 });

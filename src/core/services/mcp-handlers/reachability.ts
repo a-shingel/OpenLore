@@ -246,6 +246,11 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       .map(n => ({ name: n.name, file: n.filePath, language: n.language, fanIn: n.fanIn }))
       .sort((a, b) => a.file.localeCompare(b.file) || a.name.localeCompare(b.name));
 
+    // Delete-impact is a within-repo reachability question; federation scope (a
+    // cross-repo *liveness* signal) does not apply. Disclose rather than silently
+    // drop an opt-in flag — a cross-repo consumer is surfaced by the candidate-dead
+    // mode (omit `ifDeleted`), not here.
+    const federationRequested = input.federation === true || (input.federationRepos?.length ?? 0) > 0;
     return {
       target: target.name,
       file: target.filePath,
@@ -254,6 +259,7 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       note: becomesDead.length === 0
         ? 'Nothing else becomes unreachable — every other node has an independent path to a root (or is itself a root).'
         : 'These nodes are reachable only through the target. Deleting it orphans them — verify before removing (dynamic callers are invisible here).',
+      ...(federationRequested ? { federationNote: 'Federation scope is not applied in delete-impact (ifDeleted) mode — it is a within-repo reachability query. To see cross-repo consumers that keep a symbol live, call find_dead_code with federation and without ifDeleted, or analyze_impact with federation.' } : {}),
       soundness: deadCodeSoundness(exportSignal, languages),
     };
   }

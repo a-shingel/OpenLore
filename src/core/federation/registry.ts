@@ -8,7 +8,7 @@
  * repo builds its own index independently) — never a global rebuild.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, resolve, basename } from 'node:path';
 import {
   ARTIFACT_FINGERPRINT,
@@ -27,6 +27,24 @@ import {
 /** Absolute path to the federation manifest inside a home repo's `.openlore/`. */
 export function federationManifestPath(homeDir: string): string {
   return join(resolve(homeDir), OPENLORE_DIR, FEDERATION_MANIFEST_FILENAME);
+}
+
+/**
+ * Canonicalize a path for identity comparison. `process.cwd()` (the home dir the
+ * CLI passes) is already symlink-resolved by the OS, but a user-supplied repo path
+ * (`resolve()`d) is not — so on a system where the working tree sits behind a
+ * symlink (macOS `/tmp` → `/private/tmp`, a symlinked checkout) a plain `resolve()`
+ * comparison silently fails to match the same directory. Resolve symlinks so the
+ * home-repo self-add guard, path de-dup, and remove-by-path all compare canonically.
+ * Falls back to `resolve()` when the path does not exist (realpath would throw).
+ */
+function canonicalize(p: string): string {
+  const abs = resolve(p);
+  try {
+    return realpathSync(abs);
+  } catch {
+    return abs;
+  }
 }
 
 /** Absolute path to a repo's index fingerprint file. */
@@ -97,11 +115,11 @@ export function addRepo(
   repoPath: string,
   opts: { name?: string; now?: string } = {},
 ): { registry: FederationRegistry; entry: FederationRepoEntry } {
-  const absRepo = isAbsolute(repoPath) ? resolve(repoPath) : resolve(homeDir, repoPath);
+  const absRepo = canonicalize(isAbsolute(repoPath) ? repoPath : resolve(homeDir, repoPath));
   if (!existsSync(absRepo) || !statSync(absRepo).isDirectory()) {
     throw new Error(`Cannot add repo: ${absRepo} is not an existing directory.`);
   }
-  if (absRepo === resolve(homeDir)) {
+  if (absRepo === canonicalize(homeDir)) {
     throw new Error('Cannot add the home repo to its own federation registry; it is always in scope.');
   }
   const registry = loadRegistry(homeDir);
@@ -109,7 +127,7 @@ export function addRepo(
   if (!name) throw new Error('Repo name resolved to empty; pass --name explicitly.');
 
   // A name must be unique unless it points at the same path (a refresh).
-  const nameClash = registry.repos.find(r => r.name === name && resolve(r.path) !== absRepo);
+  const nameClash = registry.repos.find(r => r.name === name && canonicalize(r.path) !== absRepo);
   if (nameClash) {
     throw new Error(`Repo name "${name}" is already used by ${nameClash.path}; choose a different --name.`);
   }
@@ -121,7 +139,7 @@ export function addRepo(
     schemaVersion: FEDERATION_SCHEMA_VERSION,
     lastBuilt: opts.now ?? new Date().toISOString(),
   };
-  const idx = registry.repos.findIndex(r => resolve(r.path) === absRepo);
+  const idx = registry.repos.findIndex(r => canonicalize(r.path) === absRepo);
   if (idx >= 0) registry.repos[idx] = entry;
   else registry.repos.push(entry);
   registry.repos.sort((a, b) => a.name.localeCompare(b.name));
@@ -132,10 +150,10 @@ export function addRepo(
 /** Remove a repo by name or absolute/relative path. Returns true if one was removed. */
 export function removeRepo(homeDir: string, nameOrPath: string): boolean {
   const registry = loadRegistry(homeDir);
-  const absCandidate = isAbsolute(nameOrPath) ? resolve(nameOrPath) : resolve(homeDir, nameOrPath);
+  const absCandidate = canonicalize(isAbsolute(nameOrPath) ? nameOrPath : resolve(homeDir, nameOrPath));
   const before = registry.repos.length;
   registry.repos = registry.repos.filter(
-    r => r.name !== nameOrPath && resolve(r.path) !== absCandidate,
+    r => r.name !== nameOrPath && canonicalize(r.path) !== absCandidate,
   );
   if (registry.repos.length === before) return false;
   saveRegistry(homeDir, registry);

@@ -2,7 +2,7 @@
  * Federation registry unit tests (change: add-multi-repo-federation).
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, symlinkSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -105,6 +105,34 @@ describe('federation registry', () => {
 
     rmSync(indexed, { recursive: true, force: true });
     expect(evaluateRepoState(byName['indexed'])).toBe('missing');
+  });
+
+  // Regression: path identity must be symlink-canonical. The CLI passes
+  // `process.cwd()` as the home dir, which the OS already symlink-resolves, but a
+  // user-supplied repo path is only `resolve()`d. On a system where the working
+  // tree is behind a symlink (macOS /tmp → /private/tmp, a symlinked checkout) a
+  // plain string compare fails to match the same directory — so the home-repo
+  // self-add guard and the path de-dup silently broke. canonicalize() fixes it.
+  it('canonicalizes symlinked paths: rejects the home repo and de-dups across spellings', () => {
+    const realHome = realpathSync(home);
+    const linkRoot = mkdtempSync(join(tmpdir(), 'fed-link-'));
+    peers.push(linkRoot);
+    // A symlink whose target is the (real) home repo — a different spelling of it.
+    const homeLink = join(linkRoot, 'home-alias');
+    symlinkSync(realHome, homeLink);
+    // Adding the home repo via its symlinked spelling must still be rejected.
+    expect(() => addRepo(realHome, homeLink)).toThrow(/home repo/i);
+
+    // A real peer, then the same peer via a symlinked spelling → refresh, not append.
+    const peer = makePeer('a', 'h');
+    const peerLink = join(linkRoot, 'peer-alias');
+    symlinkSync(realpathSync(peer), peerLink);
+    addRepo(realHome, peer, { name: 'a' });
+    addRepo(realHome, peerLink, { name: 'a' });
+    expect(listRepos(realHome)).toHaveLength(1);
+    // remove via yet another spelling (the symlink) still matches.
+    expect(removeRepo(realHome, peerLink)).toBe(true);
+    expect(listRepos(realHome)).toHaveLength(0);
   });
 
   it('throws on a corrupt manifest rather than silently degrading', () => {

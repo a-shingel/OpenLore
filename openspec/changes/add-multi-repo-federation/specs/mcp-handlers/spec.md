@@ -26,6 +26,14 @@ opt-in `federation` preset, never in the minimal or first-run default surface.
 
 ### Requirement: FleetLevelAnchoredMemory
 
+> **⚠ DEFERRED — group 4, NOT implemented in this change. Do NOT merge into the live
+> `openspec/specs/mcp-handlers/spec.md` at archive time.** It depends on bitemporal
+> typed memory (`add-bitemporal-typed-memory-operations`, PR #163), which is not yet
+> in `main`. It is recorded here only as the full-proposal intent. Archiving this
+> requirement into the live spec would make `audit_spec_coverage` report a phantom
+> unimplemented requirement. Re-home it into its own change once PR #163 lands; see
+> `tasks.md` group 4.
+
 A memory or decision SHALL be anchorable to a published interface via its cross-repo stable ID and
 SHALL surface in consumer repositories when recall runs there, carrying its freshness verdict per the
 authoritative-recall invariant. A fleet-level memory whose anchor symbol no longer exists in the

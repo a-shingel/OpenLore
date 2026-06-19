@@ -225,11 +225,17 @@ export async function locateSymbolProducers(
 /**
  * Backward reachability to test nodes within a single loaded repo's call graph:
  * from a set of seed node IDs, walk callers up to `maxDepth` and collect any test
- * nodes reached, with hop distance.
+ * reached. Two discovery sources, matching the single-repo select_tests handler:
+ *   1. test *nodes* reached by the backward call-walk, and
+ *   2. `tested_by` edges on any reached production node (incl. the seeds) — the
+ *      import-based test association the analyzer emits for a real test file, where
+ *      the test is NOT a call-graph caller node (e.g. an inline `it(...)` block).
+ * Source 2 is the common real-world case; without it a consumer repo whose tests
+ * are detected by import association selects nothing across the boundary.
  *
  * Traverses the in-memory `SerializedCallGraph`, NOT the SQLite edge store: the
- * store persists only production nodes, so test nodes exist *only* in the call
- * graph (the same reason the single-repo select_tests handler uses ctx.callGraph).
+ * store persists only production nodes, so test nodes / tested_by edges exist
+ * *only* in the call graph (the same reason the single-repo handler uses ctx.callGraph).
  */
 export function findReachingTests(
   cg: SerializedCallGraph,
@@ -245,7 +251,16 @@ export function findReachingTests(
   // Backward adjacency: callee id → caller ids. Resolve each edge's callee to a
   // node id (prefer the resolved calleeId; fall back to a unique name match).
   const callersOf = new Map<string, Set<string>>();
+  // tested_by association: production node id → its test(s), keyed off the edge's
+  // callee (the test file/symbol). The same edge the single-repo handler reads.
+  const testedByOf = new Map<string, Array<{ name: string; file: string }>>();
   for (const e of cg.edges) {
+    if (e.kind === 'tested_by') {
+      const file = e.calleeId.includes('::') ? e.calleeId.split('::')[0] : e.calleeId;
+      if (!testedByOf.has(e.callerId)) testedByOf.set(e.callerId, []);
+      testedByOf.get(e.callerId)!.push({ name: e.calleeName, file });
+      continue;
+    }
     let calleeId: string | undefined = e.calleeId && nodeById.has(e.calleeId) ? e.calleeId : undefined;
     if (!calleeId) {
       const byName = nameToIds.get(e.calleeName);
@@ -258,7 +273,19 @@ export function findReachingTests(
 
   const isTest = (n: FunctionNode | undefined): boolean => !!n && (n.isTest || isTestFile(n.filePath));
   const tests: Array<{ id: string; name: string; file: string; depth: number }> = [];
+  // Dedup across both sources on file+name so a test reached as a call node and a
+  // tested_by target is reported once.
   const seenTest = new Set<string>();
+  const emit = (name: string, file: string, depth: number): void => {
+    const key = `${file}\0${name}`;
+    if (seenTest.has(key)) return;
+    seenTest.add(key);
+    tests.push({ id: key, name, file, depth });
+  };
+  // tested_by on a seed: the test directly exercises the consumer call site (depth 1).
+  for (const s of new Set(seedIds)) {
+    for (const t of testedByOf.get(s) ?? []) emit(t.name, t.file, 1);
+  }
   const visited = new Set<string>(seedIds);
   let frontier = [...new Set(seedIds)];
   for (let depth = 1; depth <= maxDepth && frontier.length > 0; depth++) {
@@ -268,10 +295,8 @@ export function findReachingTests(
         if (visited.has(callerId)) continue;
         visited.add(callerId);
         const node = nodeById.get(callerId);
-        if (isTest(node) && !seenTest.has(callerId)) {
-          seenTest.add(callerId);
-          tests.push({ id: node!.id, name: node!.name, file: node!.filePath, depth });
-        }
+        if (isTest(node)) emit(node!.name, node!.filePath, depth);
+        for (const t of testedByOf.get(callerId) ?? []) emit(t.name, t.file, depth);
         next.push(callerId);
       }
     }

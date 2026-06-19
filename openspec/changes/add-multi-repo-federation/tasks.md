@@ -41,6 +41,13 @@
 - [ ] Test: a memory anchored to an upstream interface surfaces (with verdict) when recalling in a
       consumer repo.
 
+> **ARCHIVE NOTE.** The `FleetLevelAnchoredMemory` requirement in
+> `specs/mcp-handlers/spec.md` covers this deferred group. It is marked DEFERRED there
+> and MUST NOT be promoted into the live `openspec/specs/mcp-handlers/spec.md` when this
+> change is archived — doing so would make `audit_spec_coverage` flag a phantom
+> unimplemented requirement. Re-home it into its own change once PR #163 (bitemporal
+> typed memory) lands in `main`.
+
 ## 5. Surface + docs
 - [x] Register federation capability behind an opt-in `federation` preset; nothing in the default.
       → `TOOL_PRESETS.federation` + `federation_status` (preset-only); `mcp-presets.test.ts` guards it.
