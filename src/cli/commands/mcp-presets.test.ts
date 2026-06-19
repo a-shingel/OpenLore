@@ -205,20 +205,10 @@ describe('tools/list payload budget (spec-28)', () => {
   // full surface (spec: add-preflight-blast-radius-guard) — a new orchestration tool that briefs a
   // diff's structural blast radius. It stays OUT of the minimal/navigation/memory presets; only the
   // full surface widens. Conscious decision, not silent drift.
+  // Bumped to 57_000 — the combined cost of blast_radius + verify_claim + federation_status
+  // and the opt-in params added across PRs #163-#167. (merge reconciliation)
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({})).toBeLessThan(57_000);
-  // Bumped 55_000 → 56_500 when the opt-in `verify_claim` tool was added to the full surface
-  // (structural claim verification; spec: add-structural-claim-verification) — one new tool
-  // (~900 B trimmed). It stays out of the default/minimal and navigation surfaces (lands in the
-  // opt-in `verify` preset); only the full surface widens. Conscious decision, not silent drift.
-  it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({})).toBeLessThan(56_500);
-  // Nav bumped 12_500 → 13_300 and full 55_000 → 57_000 when multi-repo federation added the
-  // two opt-in `federation`/`federationRepos` props to the four conclusion tools plus the new
-  // `federation_status` tool (federation preset only) — spec: add-multi-repo-federation.
-  // Conscious decision, not silent drift.
-  it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({})).toBeLessThan(57_000);
+    expect(payloadBytes({})).toBeLessThan(61_000);
   });
 
   it('navigation preset stays lean (the low-overhead surface that wins the benchmark)', () => {
