@@ -113,9 +113,12 @@ describe('handleFindDeadCode', () => {
   it('"what dies if I delete handler" returns helper (reachable only via handler)', async () => {
     const r = await handleFindDeadCode({ directory: '/p', ifDeleted: 'handler' }) as {
       target: string; becomesDeadIfDeleted: Array<{ name: string }>; count: number;
+      confidenceBoundary?: { complete: boolean };
     };
     expect(r.target).toBe('handler');
     expect(r.becomesDeadIfDeleted.map(n => n.name)).toEqual(['helper']);
+    // The boundary is attached to the delete-impact (target-mode) return too.
+    expect(typeof r.confidenceBoundary?.complete).toBe('boolean');
   });
 
   it('"what dies if I delete a leaf" returns nothing', async () => {

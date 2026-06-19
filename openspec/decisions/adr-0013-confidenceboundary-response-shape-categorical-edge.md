@@ -18,5 +18,7 @@ The system SHALL attach a deterministic confidenceBoundary object (edge provenan
 
 A new shared module src/core/services/mcp-handlers/confidence-boundary.ts owns the type and computation; seven conclusion handlers each spread a `confidenceBoundary` field into their response. analyze.ts's fingerprint.json gains an optional `commit` field (captured via git rev-parse at analyze time) so the staleness marker can name the build commit; staleness degrades gracefully (no commit / non-git repo → fingerprint-mismatch boolean without a commit name). `complete` is false whenever the computation leaned on a synthesized edge, crossed a known-unknowable boundary, or ran against a stale index — the answer-level NoFalseCompleteness contract.
 
+> **Superseded in part by decision `f0b7f99f` (2026-06-18):** the staleness mechanism is git-diff-based, not a fingerprint-hash recompute, and degrades to **no marker (silent)** — not a "fingerprint-mismatch boolean" — for a non-git repo or an index with no captured commit. The response shape recorded above is unchanged.
+
 > Recorded by openlore decisions on 2026-06-18
 > Decision ID: 08e71184

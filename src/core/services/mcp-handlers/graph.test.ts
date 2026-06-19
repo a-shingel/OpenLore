@@ -974,11 +974,13 @@ describe('symbol resolution — exact-match preference', () => {
     // is named exactly "authent", so the result stays a { matches } disambiguation list.
     store.insertNodes([makeNode({ id: 'src/auth.ts::reauthenticate', fanIn: 0, fanOut: 0 })]);
     vi.mocked(readCachedContext).mockResolvedValueOnce({ edgeStore: store } as never);
-    const result = await handleAnalyzeImpact(dir, 'authent', 2) as { symbol?: string; matches?: Array<{ symbol: string }> };
+    const result = await handleAnalyzeImpact(dir, 'authent', 2) as { symbol?: string; matches?: Array<{ symbol: string }>; confidenceBoundary?: { complete: boolean } };
     expect(result.matches).toBeDefined();
     expect(result.matches!.length).toBeGreaterThan(1);
     expect(result.matches!.map(m => m.symbol)).toContain('authenticate');
     expect(result.matches!.map(m => m.symbol)).toContain('reauthenticate');
+    // The boundary is attached to the multi-seed { matches } shape too, not just the flat one.
+    expect(typeof result.confidenceBoundary?.complete).toBe('boolean');
   });
 
   it('get_subgraph resolves the exact symbol when fuzzy hits also exist', async () => {

@@ -134,9 +134,10 @@ describe('handleFindPath', () => {
 
   it('returns a clear note when from and to are the same endpoint (no traversal needed)', async () => {
     mockCtx.mockResolvedValue({ callGraph: cg } as never);
-    const r = await handleFindPath('/p', 'main', 'main') as { path: null; note: string };
+    const r = await handleFindPath('/p', 'main', 'main') as { path: null; note: string; confidenceBoundary: { complete: boolean } };
     expect(r.path).toBeNull();
     expect(r.note).toMatch(/same function/);
+    expect(r.confidenceBoundary.complete).toBe(true); // same-endpoint return attaches a boundary too
   });
 
   // confidenceBoundary wiring (spec: add-confidence-boundary-disclosure). The fixture
