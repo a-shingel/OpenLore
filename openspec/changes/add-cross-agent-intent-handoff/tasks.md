@@ -21,7 +21,10 @@
 - [~] Include memories/decisions from any agent/human anchored to in-scope code, each with its freshness
       verdict; withhold orphaned, flag drifted — ALREADY SHIPPED via the cross-session briefing; reverted
       cross-agent intent now also surfaces under `reversals`.
-- [ ] Under federation, include constraints on in-scope published interfaces from other repos — DEFERRED.
+- [x] Under federation, include constraints on in-scope published interfaces from other repos — DONE in
+      PR #168 as `FleetLevelAnchoredMemory` (recall `fleetMemory` block; ADR-0019). A producer-repo memory
+      anchored to an interface the consumer references surfaces with its producer-side verdict; orphaned
+      withheld. See `add-multi-repo-federation` group 4 + `src/core/federation/fleet-memory.ts`.
 - [~] Test: an orphaned prior decision never appears as current — `orient-memory-freshness.test.ts`;
       ReversalAwareness adds: reverted intent never appears under `pendingDecisions`
       (`orient-reversal-awareness.test.ts`).

@@ -1625,7 +1625,7 @@ export const TOOL_DEFINITIONS = [
       'Recall code-anchored memories (notes + decisions) for a task with a freshness verdict: fresh, ' +
       'drifted (verify), or orphaned (in needsReanchoring, never authoritative). Two authoritative ' +
       'memories on one symbol surface in unreconciled. Optional: asOf/changedSince (commit-ish) for ' +
-      'history, type filter. Omit task to scan all.',
+      'history, type filter, federation (surface producer-repo memory on interfaces you call). Omit task to scan all.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1636,6 +1636,7 @@ export const TOOL_DEFINITIONS = [
         asOf: { type: 'string', description: 'Commit-ish: memory authoritative as of that commit.' },
         changedSince: { type: 'string', description: 'Commit-ish: memory recorded/invalidated after it.' },
         type: { type: 'string', description: 'Restrict notes to this type (decisions excluded when set).' },
+        ...FEDERATION_PROPS,
       },
       required: ['directory'],
     },

@@ -671,3 +671,30 @@ history) and omitted entirely when nothing in scope was reverted.
 - **GIVEN** a decision superseded by a later decision
 - **WHEN** `orient` runs for a task in that decision's scope
 - **THEN** the superseded decision appears only under `reversals`, never under `pendingDecisions`
+
+### Requirement: FleetLevelAnchoredMemory
+
+A memory anchored to a published interface SHALL surface, with its freshness verdict, when an agent
+recalls while editing a consumer repository that references that interface. `recall` SHALL accept the
+opt-in `federation` / `federationRepos` params (inert without an `.openlore/federation.json` registry)
+and, when active, return a `fleetMemory` block: for each upstream interface the home repo references
+(its external call edges), it loads each scoped producer repo's index once, selects the producer
+memories anchored to that interface (matched by exact symbol name — arity/overload unconfirmed at an
+external call site), and computes each memory's freshness against the **producer's** graph. A
+fleet-level memory whose anchor no longer exists in the producer SHALL be `orphaned` and withheld from
+the authoritative set, identically to a single-repo memory; a retired (invalidated) producer memory
+SHALL likewise be excluded. The selection SHALL be deterministic (no LLM), bounded with an explicit
+omission note, and SHALL name the repos consulted and skipped (a stale/unindexed producer is reported,
+never guessed). Decisions extend the same mechanism and are a documented follow-up.
+
+#### Scenario: A producer-side memory surfaces in a consumer
+
+- **GIVEN** a fresh memory anchored to an interface exported by repo A, and consumer repo B references it
+- **WHEN** an agent recalls in B with `federation` active
+- **THEN** the memory surfaces in B's `fleetMemory` carrying its freshness verdict, naming repo A
+
+#### Scenario: An orphaned fleet memory is withheld
+
+- **GIVEN** a producer memory whose anchor symbol no longer exists in the producer
+- **WHEN** an agent recalls in a consumer repo with `federation` active
+- **THEN** the memory does not appear as authoritative, even though the producer repo was consulted
