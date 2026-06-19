@@ -389,6 +389,12 @@ The system SHALL preserve user formatting in existing JSON configuration files b
 
 > Decision recorded: df27e8ef
 > Date: 2026-06-16
+### Requirement: FederationRegistryIsAProjectlocalIndexofindexesManifest
+
+The system SHALL maintain a project-local federation registry at .openlore/federation.json that references external repos' independently-built indexes without materializing a union graph.
+
+> Decision recorded: bf5aff2d
+> Date: 2026-06-19
 
 ## Technical Notes
 
@@ -535,3 +541,13 @@ Surface 'which functions are structural anchors and why' as a set of labeled sig
 When the target file already exists, applying JSON.stringify rewrites the entire file and clobbers user formatting (e.g. collapsing multi-line arrays, normalizing indent), producing noisy git diffs and violating the merge-not-clobber install contract. Fix: use jsonc-parser (a zero-dependency JSON-CST editor from the VS Code ecosystem) to apply minimal edits to only the OpenLore-managed paths, with formatting options detected from the file. This is preferred over hand-rolling text edits (error-prone) or indent-detection-only fixes (still normalizes intra-line formatting). New files are still created with JSON.stringify.
 
 **Consequences:** Adds jsonc-parser as a runtime dependency. A shared helper (json-managed.ts) applies path edits preserving byte-identical formatting for untouched keys. The claude-code adapter's settings.json and .mcp.json writes use it for apply and uninstall. Other adapters (cursor, continue) can adopt the same helper.
+
+### Federation registry is a project-local index-of-indexes manifest
+
+**Status:** Approved
+**Date:** 2026-06-19
+**ID:** bf5aff2d
+
+Multi-repo federation needs a registry that references each repo's independently-built .openlore index without merging graphs. Store it project-local at .openlore/federation.json (hermetic, deterministic, co-located with the index) rather than ~/.openlore. Each entry is { name, path (absolute), fingerprint, schemaVersion, lastBuilt } sourced from the target repo's .openlore/analysis/fingerprint.json. The home repo (the one holding the registry) is implicitly in scope. Adding/removing a repo edits only the registry plus that repo's own local build — never a global rebuild.
+
+**Consequences:** A new src/core/federation/ module owns registry load/save/add/remove/list. Federated queries load per-repo CachedContext lazily via readCachedContext on demand; no union graph is materialized. Remote (git-remote) repos and a global ~/.openlore registry are deferred to a follow-up.

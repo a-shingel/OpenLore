@@ -13,6 +13,7 @@
 
 import { relative } from 'node:path';
 import { validateDirectory, readCachedContext } from './utils.js';
+import { resolveFederationScope, locateSymbolProducers } from '../../federation/resolver.js';
 import { buildAdjacency, buildWeightedAdjacency, weightedBfs } from './graph.js';
 import type { WeightedReach } from './graph.js';
 import { SUBGRAPH_MAX_DEPTH_LIMIT } from '../../../constants.js';
@@ -128,7 +129,7 @@ export async function handleFindPath(
   directory: string,
   from: string,
   to: string,
-  opts: { useCallDistance?: boolean; directResolvedOnly?: boolean } = {},
+  opts: { useCallDistance?: boolean; directResolvedOnly?: boolean; federation?: boolean; federationRepos?: string[] } = {},
 ): Promise<unknown> {
   const absDir = await validateDirectory(directory);
   const ctx = await readCachedContext(absDir);
@@ -147,8 +148,6 @@ export async function handleFindPath(
   const SELECTOR_HELP = 'Use a function name, landmark:<id>, role:entrypoint|hub|sink, or file:<path>.';
   if (fromRes.kind === 'error') return { error: `Unknown "from" selector "${from}". ${SELECTOR_HELP}` };
   if (toRes.kind === 'error') return { error: `Unknown "to" selector "${to}". ${SELECTOR_HELP}` };
-  if (fromRes.nodes.length === 0) return { error: `"${from}" resolved to no functions.` };
-  if (toRes.nodes.length === 0) return { error: `"${to}" resolved to no functions.` };
 
   const describe = (r: ResolvedEndpoint, selector: string) => ({
     selector, kind: r.kind, matched: r.nodes.length, sample: r.nodes.slice(0, 5).map(n => n.name),
@@ -156,13 +155,56 @@ export async function handleFindPath(
   const resolvedFrom = describe(fromRes, from);
   const resolvedTo = describe(toRes, to);
 
+  // Federation (opt-in): name which scoped repos *define* the `to` symbol and
+  // whether the home repo bridges to it (home call sites that reach it as an
+  // external reference). This explains a cross-repo path without ever merging
+  // graphs, and lets a `to` that lives in ANOTHER repo resolve at all.
+  // (change: add-multi-repo-federation)
+  let federationBlock: Record<string, unknown> | undefined;
+  const fedScope = resolveFederationScope(absDir, { federation: opts.federation, federationRepos: opts.federationRepos });
+  if (fedScope.active) {
+    const hasSelectorPrefix = /^(role:|landmark:|file:|name:)/.test(to);
+    const toName = hasSelectorPrefix ? (toRes.kind === 'name' ? toRes.nodes[0]?.name : undefined) : to.replace(/^name:/, '');
+    const bridgeCallers = toName && ctx.edgeStore
+      ? [...new Set(ctx.edgeStore.getExternalConsumers(toName).map(e => e.callerId))]
+          .map(id => ctx.edgeStore!.getNode(id)?.name ?? id)
+      : [];
+    const located = toName ? await locateSymbolProducers(fedScope, toName) : { producers: [], coverage: { applied: true, reposConsulted: [], reposSkipped: [], caveats: [] } };
+    federationBlock = {
+      to: toName ?? to,
+      producers: located.producers.map(p => ({ repo: p.repo, file: p.node.file, stableId: p.node.stableId })),
+      bridge: { present: bridgeCallers.length > 0, fromHomeCallers: bridgeCallers },
+      reposConsulted: located.coverage.reposConsulted.map(r => r.name),
+      reposSkipped: located.coverage.reposSkipped.map(r => ({ name: r.name, state: r.state, reason: r.reason })),
+      caveats: located.producers.length > 0
+        ? ['Cross-repo producer located by exact symbol name; no merged graph — the home and producer paths are reported separately, bridged at the external call site.']
+        : [],
+    };
+  }
+  const withFed = <T extends Record<string, unknown>>(obj: T): T => (federationBlock ? { ...obj, federation: federationBlock } : obj);
+
+  if (fromRes.nodes.length === 0) return withFed({ error: `"${from}" resolved to no functions.` });
+  if (toRes.nodes.length === 0) {
+    // `to` isn't in the home graph. When federation locates it in another repo,
+    // answer with the cross-repo location + bridge instead of a bare error.
+    const producers = (federationBlock?.producers as unknown[] | undefined) ?? [];
+    if (producers.length > 0) {
+      return withFed({
+        from, to, resolvedFrom, resolvedTo, path: null,
+        crossRepo: true,
+        note: `"${to}" is not defined in the home repo; it is published by another federated repo. The home path reaches it at the external call site(s) named in federation.bridge.`,
+      });
+    }
+    return withFed({ error: `"${to}" resolved to no functions.` });
+  }
+
   // Same-endpoint query: every resolved target is also a source — no traversal needed.
   const fromIds = new Set(fromRes.nodes.map(n => n.id));
   if (toRes.nodes.every(n => fromIds.has(n.id))) {
-    return {
+    return withFed({
       from, to, resolvedFrom, resolvedTo, path: null,
       note: 'from and to resolve to the same function(s) — no path to compute.',
-    };
+    });
   }
 
   const useCallDistance = opts.useCallDistance !== false;
@@ -174,23 +216,23 @@ export async function handleFindPath(
   });
 
   if (!result.found) {
-    return {
+    return withFed({
       from, to, resolvedFrom, resolvedTo, path: null,
       noPath: {
         reason: `No call path from "${from}" to "${to}" within ${useCallDistance ? `call-distance ${PATH_MAX_DISTANCE}` : `depth ${SUBGRAPH_MAX_DEPTH_LIMIT}`}.`,
         reachedNodes: result.reached,
         hint: 'The endpoints may be in different connected components, or only linked by a longer path — try the other endpoint kinds.',
       },
-    };
+    });
   }
 
   const best = result.best!;
-  return {
+  return withFed({
     from, to, resolvedFrom, resolvedTo,
     path: toChain(best),
     alternates: result.alternates.map(toChain),
     reason: useCallDistance
       ? `Cheapest by call-distance (cost ${best.distance}, ${best.hops} hops); ${result.alternates.length} alternate(s).`
       : `Fewest hops (${best.hops}); ${result.alternates.length} alternate(s).`,
-  };
+  });
 }

@@ -1,0 +1,169 @@
+/**
+ * Federation resolver unit tests — cross-repo consumer resolution, producer
+ * location, and cross-repo test selection over synthetic on-disk indexes.
+ * (change: add-multi-repo-federation)
+ */
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { EdgeStore } from '../services/edge-store.js';
+import { OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_LLM_CONTEXT } from '../../constants.js';
+import { addRepo } from './registry.js';
+import {
+  resolveFederationScope,
+  findCrossRepoConsumers,
+  findCrossRepoConsumersBatch,
+  locateSymbolProducers,
+  findCrossRepoTests,
+} from './resolver.js';
+import type { FunctionNode, CallEdge } from '../analyzer/call-graph.js';
+
+function node(id: string, name: string, filePath: string, extra: Partial<FunctionNode> = {}): FunctionNode {
+  return { id, name, filePath, isAsync: false, language: 'typescript', startIndex: 0, endIndex: 1, fanIn: 0, fanOut: 0, ...extra };
+}
+function edge(callerId: string, calleeId: string, calleeName: string, confidence: CallEdge['confidence']): CallEdge {
+  return { callerId, calleeId, calleeName, confidence };
+}
+
+/** Materialize a repo index: SQLite production graph + llm-context callGraph + fingerprint. */
+function makeRepoIndex(
+  prefix: string,
+  prodNodes: FunctionNode[],
+  prodEdges: CallEdge[],
+  fullCallGraph: { nodes: FunctionNode[]; edges: CallEdge[] },
+): string {
+  const dir = mkdtempSync(join(tmpdir(), `fed-${prefix}-`));
+  created.push(dir);
+  const adir = join(dir, OPENLORE_ANALYSIS_REL_PATH);
+  mkdirSync(adir, { recursive: true });
+  const store = EdgeStore.open(EdgeStore.dbPath(adir));
+  store.clearAll();
+  store.insertNodes(prodNodes);
+  store.insertEdges(prodEdges);
+  store.close();
+  const callGraph = {
+    ...fullCallGraph, classes: [], inheritanceEdges: [], hubFunctions: [], entryPoints: [], layerViolations: [],
+    stats: { totalNodes: fullCallGraph.nodes.length, totalEdges: fullCallGraph.edges.length, avgFanIn: 0, avgFanOut: 0 },
+  };
+  writeFileSync(join(adir, ARTIFACT_LLM_CONTEXT), JSON.stringify({ callGraph }));
+  writeFileSync(join(adir, 'fingerprint.json'), JSON.stringify({ hash: `fp-${prefix}`, computedAt: '2026-06-19T00:00:00.000Z', fileCount: prodNodes.length }));
+  return dir;
+}
+
+const created: string[] = [];
+let producer: string; // repo A: defines greet
+let consumer: string; // repo B: welcome() calls greet (external); testWelcome() tests welcome
+
+beforeEach(() => {
+  // Producer A: greet is an internal published symbol.
+  const greet = node('src/index.ts::greet', 'greet', 'src/index.ts', { stableId: 'sid:greet(name: string)' });
+  producer = makeRepoIndex('producer', [greet], [], { nodes: [greet], edges: [] });
+
+  // Consumer B: welcome → greet (external), runApp → welcome, testWelcome → welcome (test).
+  const welcome = node('src/app.ts::welcome', 'welcome', 'src/app.ts');
+  const runApp = node('src/app.ts::runApp', 'runApp', 'src/app.ts');
+  const greetExt = node('external::greet', 'greet', 'external', { isExternal: true });
+  const testWelcome = node('src/app.test.ts::testWelcome', 'testWelcome', 'src/app.test.ts', { isTest: true });
+  const prodEdges = [edge('src/app.ts::welcome', 'external::greet', 'greet', 'external')];
+  const fullEdges = [
+    edge('src/app.ts::welcome', 'external::greet', 'greet', 'external'),
+    edge('src/app.ts::runApp', 'src/app.ts::welcome', 'welcome', 'same_file'),
+    edge('src/app.test.ts::testWelcome', 'src/app.ts::welcome', 'welcome', 'name_only'),
+  ];
+  consumer = makeRepoIndex('consumer', [welcome, runApp], prodEdges, {
+    nodes: [welcome, runApp, greetExt, testWelcome],
+    edges: fullEdges,
+  });
+});
+
+afterEach(() => {
+  for (const d of created.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+describe('resolveFederationScope', () => {
+  it('is inactive unless federation is requested', () => {
+    expect(resolveFederationScope(producer, {}).active).toBe(false);
+    expect(resolveFederationScope(producer, { federation: false }).active).toBe(false);
+  });
+
+  it('activates with all registered repos when federation=true', () => {
+    addRepo(producer, consumer, { name: 'consumer-b' });
+    const scope = resolveFederationScope(producer, { federation: true });
+    expect(scope.active).toBe(true);
+    expect(scope.repos.map(r => r.name)).toEqual(['consumer-b']);
+  });
+
+  it('restricts to named repos and reports unknown names', () => {
+    addRepo(producer, consumer, { name: 'consumer-b' });
+    const scope = resolveFederationScope(producer, { federationRepos: ['consumer-b', 'ghost'] });
+    expect(scope.repos.map(r => r.name)).toEqual(['consumer-b']);
+    expect(scope.unknownNames).toEqual(['ghost']);
+  });
+});
+
+describe('findCrossRepoConsumers', () => {
+  it('resolves a published symbol to its consumer in an indexed repo', async () => {
+    addRepo(producer, consumer, { name: 'consumer-b' });
+    const scope = resolveFederationScope(producer, { federation: true });
+    const res = await findCrossRepoConsumers(scope, 'greet');
+    expect(res.consumers).toHaveLength(1);
+    expect(res.consumers[0]).toMatchObject({ repo: 'consumer-b', caller: { name: 'welcome' }, symbol: 'greet' });
+    expect(res.coverage.reposConsulted.map(r => r.name)).toEqual(['consumer-b']);
+    expect(res.coverage.caveats.join(' ')).toMatch(/collision/i);
+  });
+
+  it('reports a stale repo as skipped, never consulted', async () => {
+    addRepo(producer, consumer, { name: 'consumer-b' });
+    // Drift the consumer fingerprint after registration.
+    writeFileSync(join(consumer, OPENLORE_ANALYSIS_REL_PATH, 'fingerprint.json'), JSON.stringify({ hash: 'fp-changed', computedAt: 'x', fileCount: 9 }));
+    const scope = resolveFederationScope(producer, { federation: true });
+    const res = await findCrossRepoConsumers(scope, 'greet');
+    expect(res.consumers).toHaveLength(0);
+    expect(res.coverage.reposConsulted).toHaveLength(0);
+    expect(res.coverage.reposSkipped[0]).toMatchObject({ name: 'consumer-b', state: 'stale' });
+  });
+
+  it('returns nothing for a symbol no one consumes', async () => {
+    addRepo(producer, consumer, { name: 'consumer-b' });
+    const scope = resolveFederationScope(producer, { federation: true });
+    const res = await findCrossRepoConsumers(scope, 'farewell');
+    expect(res.consumers).toHaveLength(0);
+    expect(res.coverage.reposConsulted.map(r => r.name)).toEqual(['consumer-b']);
+  });
+
+  it('batches multiple symbols, loading each repo once', async () => {
+    addRepo(producer, consumer, { name: 'consumer-b' });
+    const scope = resolveFederationScope(producer, { federation: true });
+    const batch = await findCrossRepoConsumersBatch(scope, ['greet', 'farewell']);
+    expect(batch.bySymbol.get('greet')).toHaveLength(1);
+    expect(batch.bySymbol.get('farewell')).toHaveLength(0);
+  });
+});
+
+describe('locateSymbolProducers', () => {
+  it('names the repo that defines a symbol, with its stable id', async () => {
+    addRepo(consumer, producer, { name: 'producer-a' });
+    const scope = resolveFederationScope(consumer, { federation: true });
+    const res = await locateSymbolProducers(scope, 'greet');
+    expect(res.producers).toHaveLength(1);
+    expect(res.producers[0]).toMatchObject({ repo: 'producer-a', node: { name: 'greet', stableId: 'sid:greet(name: string)' } });
+  });
+});
+
+describe('findCrossRepoTests', () => {
+  it('selects a consumer-repo test that reaches a call site of the changed symbol', async () => {
+    addRepo(producer, consumer, { name: 'consumer-b' });
+    const scope = resolveFederationScope(producer, { federation: true });
+    const res = await findCrossRepoTests(scope, ['greet']);
+    expect(res.tests).toHaveLength(1);
+    expect(res.tests[0]).toMatchObject({ repo: 'consumer-b', test: { name: 'testWelcome' }, viaSymbol: 'greet' });
+  });
+
+  it('selects nothing when the changed symbol has no consumer', async () => {
+    addRepo(producer, consumer, { name: 'consumer-b' });
+    const scope = resolveFederationScope(producer, { federation: true });
+    const res = await findCrossRepoTests(scope, ['farewell']);
+    expect(res.tests).toHaveLength(0);
+  });
+});

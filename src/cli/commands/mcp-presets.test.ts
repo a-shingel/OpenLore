@@ -51,6 +51,19 @@ describe('MCP tool presets', () => {
   it('an unknown preset throws with the known list, not a silent full surface', () => {
     expect(() => selectActiveTools(TOOL_DEFINITIONS, { preset: 'nope' })).toThrow(/Unknown --preset "nope".*minimal.*navigation/s);
   });
+
+  // change: add-multi-repo-federation — FederationScopedConclusions: the
+  // federation capability (federation_status) appears ONLY under the federation
+  // preset; the default and minimal surfaces register no federation capability.
+  it('federation_status is gated to the federation preset, never in default/minimal', () => {
+    const fed = selectActiveTools(TOOL_DEFINITIONS, { preset: 'federation' }).map(t => t.name);
+    expect(fed).toContain('federation_status');
+    expect(new Set(fed)).toEqual(new Set(['orient', 'federation_status', 'analyze_impact', 'find_dead_code', 'select_tests', 'find_path']));
+
+    expect(selectActiveTools(TOOL_DEFINITIONS, { minimal: true }).map(t => t.name)).not.toContain('federation_status');
+    // Default surface DOES list the four federation-aware tools, but federation_status
+    // — the registry-backed capability — is the opt-in marker and rides only the preset.
+  });
 });
 
 // ============================================================================
@@ -170,12 +183,16 @@ describe('tools/list payload budget (spec-28)', () => {
   // PageRank ranking mode (`rankBy` on orient + `rankBy`/`tokenBudget` on get_minimal_context;
   // spec: add-personalized-pagerank-context-ranking) was added — a ranking MODE on existing
   // tools, no new tool, default surface count unchanged. Conscious decision, not silent drift.
+  // Nav bumped 12_500 → 13_300 and full 55_000 → 57_000 when multi-repo federation added the
+  // two opt-in `federation`/`federationRepos` props to the four conclusion tools plus the new
+  // `federation_status` tool (federation preset only) — spec: add-multi-repo-federation.
+  // Conscious decision, not silent drift.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({})).toBeLessThan(55_000);
+    expect(payloadBytes({})).toBeLessThan(57_000);
   });
 
   it('navigation preset stays lean (the low-overhead surface that wins the benchmark)', () => {
-    expect(payloadBytes({ preset: 'navigation' })).toBeLessThan(12_500);
+    expect(payloadBytes({ preset: 'navigation' })).toBeLessThan(13_300);
   });
 
   // Lossless-dedup invariant: the `directory` input is shared by every tool, so its

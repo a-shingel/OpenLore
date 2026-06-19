@@ -14,6 +14,7 @@
  */
 
 import { validateDirectory, readCachedContext } from './utils.js';
+import { resolveFederationScope, findCrossRepoTests } from '../../federation/resolver.js';
 import { buildAdjacency } from './graph.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
 import { SUBGRAPH_MAX_DEPTH_LIMIT } from '../../../constants.js';
@@ -33,6 +34,13 @@ export interface SelectTestsInput {
    * only through a callback/event/route are still selected).
    */
   directResolvedOnly?: boolean;
+  /**
+   * Opt in to federation scope: also select tests in consumer repos that reach a
+   * call site of a changed published symbol. (change: add-multi-repo-federation)
+   */
+  federation?: boolean;
+  /** Restrict the federation scope to these registry repo names (default: all). */
+  federationRepos?: string[];
 }
 
 type Confidence = 'high' | 'medium' | 'low';
@@ -244,11 +252,28 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
     caveats.push('No test transitively reaches the change. It may be genuinely untested, or reached only via dynamic dispatch this static analysis cannot see.');
   }
 
+  // Federation (opt-in): select tests in consumer repos that reach a call site of
+  // a changed published symbol — the cross-repo blast radius of the change.
+  // (change: add-multi-repo-federation)
+  let federationBlock: Record<string, unknown> | undefined;
+  const fedScope = resolveFederationScope(absDir, { federation: input.federation, federationRepos: input.federationRepos });
+  if (fedScope.active) {
+    const { tests: crossRepoTests, coverage } = await findCrossRepoTests(fedScope, seeds.map(s => s.name), { maxDepth });
+    federationBlock = {
+      crossRepoTests: crossRepoTests.map(t => ({ repo: t.repo, test: t.test.name, file: t.test.file, viaSymbol: t.viaSymbol, confidence: t.depth <= 1 ? 'high' : t.depth <= 3 ? 'medium' : 'low' })),
+      crossRepoTestCount: crossRepoTests.length,
+      reposConsulted: coverage.reposConsulted.map(r => r.name),
+      reposSkipped: coverage.reposSkipped.map(r => ({ name: r.name, state: r.state, reason: r.reason })),
+      caveats: coverage.caveats,
+    };
+  }
+
   return {
     changed: hasSymbols ? seeds.map(s => s.name) : changedFiles,
     seeds: seeds.map(s => ({ name: s.name, file: s.filePath })),
     selectedTests,
     ...(defaultedToHead ? { note: 'No changedSymbols/diffRef given — selected tests for your current working-tree changes vs HEAD.' } : {}),
+    ...(federationBlock ? { federation: federationBlock } : {}),
     soundness: { posture: 'over-approximate' as const, caveats },
     coverage: { languages: seedLangs, testDetection },
   };
