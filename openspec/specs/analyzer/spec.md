@@ -6149,16 +6149,6 @@ Every conclusion tool (analyze_impact, find_path, find_dead_code, get_subgraph, 
 
 **Status:** Approved
 **Date:** 2026-06-18
-**ID:** e4c0a61a
-
-Refines decision 08e71184 (boundary response shape stays as recorded). Dogfooding showed that comparing the analyze-time project fingerprint (whole-tree mtime+size hash) against a query-time recompute is unreliable across the analyze→query boundary: OpenLore's own .openlore-live-cache fixture dir plus mtime drift make the hashes mismatch even when the user's source is unchanged, so the staleness marker fired on every answer (crying wolf, which trains agents to ignore it). Replaced with a deterministic git signal: staleness fires iff `git diff --name-only <buildCommit>` reports a positive count of graph-relevant source files changed since the commit the index was built at.
-
-**Consequences:** computeStaleness no longer calls computeProjectFingerprint; it reads the build commit from fingerprint.json and shells `git diff` (memoized 5s per dir). A pure buildStalenessMarker(commit, changedCount) holds the emit/silent logic and is unit-tested. Non-git repos and indexes with no captured commit get NO staleness marker (silent rather than false-positive) — a deliberate honesty tradeoff. The pre-existing fingerprint-includes-.openlore-live-cache bug that affects isCacheFresh is left untouched and flagged separately.
-
-### Confidence-boundary staleness uses git-diff against the build commit, not a fingerprint-hash recompute
-
-**Status:** Approved
-**Date:** 2026-06-18
 **ID:** f0b7f99f
 
 Comparing the analyze-time project fingerprint (whole-tree mtime+size hash) against a query-time recompute is unreliable: fixture dirs and mtime drift cause false-positive staleness on every answer, training agents to ignore the marker. Replaced with a deterministic git signal: staleness fires iff `git diff --name-only <buildCommit>` reports graph-relevant source files changed since the index was built. Non-git repos and indexes with no captured commit get NO staleness marker (silent rather than false-positive) — a deliberate honesty tradeoff.

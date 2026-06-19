@@ -355,9 +355,11 @@ describe('isCacheFresh', () => {
     expect(await computeProjectFingerprint(tmpDir)).toBe(before);
     expect(await isCacheFresh(tmpDir)).toBe(true);
 
-    // Sanity: a real user-source change DOES flap the hash.
+    // Sanity: a real user-source change DOES flap the hash AND invalidate the cache —
+    // the exclusion suppresses only OpenLore's own churn, never the user's edits.
     await writeFile(join(userSrc, 'app.ts'), 'export const x = 2;\nexport const y = 3;\n', 'utf-8');
     expect(await computeProjectFingerprint(tmpDir)).not.toBe(before);
+    expect(await isCacheFresh(tmpDir)).toBe(false);
   });
 });
 

@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -69,6 +70,18 @@ describe('buildPairEdgeIndex + edgeBasisForChains', () => {
     const idx = buildPairEdgeIndex([
       { callerId: 'a', calleeId: 'b', confidence: 'synthesized', synthesizedBy: 'route-handler' },
       { callerId: 'a', calleeId: 'b', confidence: 'import' },
+    ]);
+    const b = edgeBasisForChains([['a', 'b']], idx);
+    expect(b.directEdges).toBe(1);
+    expect(b.synthesizedEdges).toBe(0);
+  });
+
+  it('keeps the direct edge when it is seen BEFORE the synthesized one (no clobber)', () => {
+    // Reverse of the prefer-direct case: a later synthesized edge must not overwrite
+    // an already-recorded direct edge for the same pair. Guards the non-overwrite branch.
+    const idx = buildPairEdgeIndex([
+      { callerId: 'a', calleeId: 'b', confidence: 'import' },
+      { callerId: 'a', calleeId: 'b', confidence: 'synthesized', synthesizedBy: 'route-handler' },
     ]);
     const b = edgeBasisForChains([['a', 'b']], idx);
     expect(b.directEdges).toBe(1);
@@ -195,4 +208,57 @@ describe('computeStaleness (integration)', () => {
   });
 
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
+});
+
+describe('computeStaleness (git-backed positive path + memo)', () => {
+  let dir: string;
+  let head: string;
+
+  const git = (...args: string[]) =>
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd: dir });
+  const writeFingerprint = (obj: object) =>
+    writeFileSync(join(dir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_FINGERPRINT), JSON.stringify(obj));
+
+  beforeEach(() => {
+    __resetStalenessMemo();
+    dir = mkdtempSync(join(tmpdir(), 'cb-git-'));
+    mkdirSync(join(dir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR), { recursive: true });
+    git('init', '-q');
+    writeFileSync(join(dir, 'src.ts'), 'export const a = 1;\n');
+    git('add', 'src.ts');
+    git('commit', '-q', '-m', 'init');
+    head = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: dir }).toString().trim();
+    writeFingerprint({ hash: 'h', commit: head });
+  });
+
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('emits a marker naming the build commit when a graph-source file changed since it', async () => {
+    writeFileSync(join(dir, 'src.ts'), 'export const a = 2;\n'); // uncommitted edit to a .ts file
+    const m = await computeStaleness(dir);
+    expect(m).toBeDefined();
+    expect(m!.indexCommit).toBe(head);
+    expect(m!.filesChangedSince).toBeGreaterThanOrEqual(1);
+  });
+
+  it('ignores a non-graph-source change (docs-only does not stale the graph)', async () => {
+    writeFileSync(join(dir, 'README.md'), '# changed\n');
+    git('add', 'README.md');
+    expect(await computeStaleness(dir)).toBeUndefined();
+  });
+
+  it('memoizes within the TTL and re-reads after it expires', async () => {
+    writeFileSync(join(dir, 'src.ts'), 'export const a = 2;\n'); // dirty vs the build commit
+    const first = await computeStaleness(dir, 1_000);
+    expect(first).toBeDefined();
+
+    // Revert the edit so the tree is now clean vs the build commit again.
+    writeFileSync(join(dir, 'src.ts'), 'export const a = 1;\n');
+
+    // A call within the 5s TTL must return the memoized (stale) marker, not re-read.
+    expect(await computeStaleness(dir, 1_000 + 4_000)).toBe(first);
+
+    // Past the TTL it re-reads; the tree is clean now → silent.
+    expect(await computeStaleness(dir, 1_000 + 6_000)).toBeUndefined();
+  });
 });

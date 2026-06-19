@@ -1217,3 +1217,115 @@ describe('weightedBfs', () => {
     expect(reach.has(a.id)).toBe(true);
   });
 });
+
+// ============================================================================
+// confidenceBoundary wiring — every graph conclusion handler attaches the field,
+// reports a complete boundary on an all-direct answer, and an incomplete one that
+// discloses the crossing when the traversal leaned on a synthesized edge.
+// (spec: add-confidence-boundary-disclosure)
+// ============================================================================
+
+type Boundary = {
+  complete: boolean;
+  basis?: { directEdges: number; synthesizedEdges: number; synthesizedByRule?: Record<string, number> };
+  knownUnknowable?: Array<{ kind: string; rule?: string }>;
+};
+
+function synthEdge(callerId: string, calleeId: string, rule = 'cha-name-only'): CallEdge {
+  return { callerId, calleeId, calleeName: calleeId.split('::')[1] ?? calleeId, confidence: 'synthesized', kind: 'calls', synthesizedBy: rule };
+}
+
+describe('confidenceBoundary wiring — handleGetSubgraph', () => {
+  let dir: string;
+  let store: EdgeStore;
+  afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+
+  it('reports complete with an all-direct basis (no fingerprint → staleness silent)', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'cb-subgraph-'));
+    store = EdgeStore.open(join(dir, 'call-graph.db'));
+    store.insertNodes([makeNode({ id: 'src/a.ts::entry', fanOut: 1 }), makeNode({ id: 'src/b.ts::leaf' })]);
+    store.insertEdges([makeEdge('src/a.ts::entry', 'src/b.ts::leaf')]);
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ edgeStore: store } as never);
+
+    const b = (await handleGetSubgraph(dir, 'entry', 'downstream', 2) as { confidenceBoundary: Boundary }).confidenceBoundary;
+    expect(b.complete).toBe(true);
+    expect(b.basis!.directEdges).toBeGreaterThanOrEqual(1);
+    expect(b.basis!.synthesizedEdges).toBe(0);
+    expect(b.knownUnknowable).toBeUndefined();
+  });
+
+  it('reports incomplete and discloses the crossing when a subgraph edge is synthesized', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'cb-subgraph-'));
+    store = EdgeStore.open(join(dir, 'call-graph.db'));
+    store.insertNodes([makeNode({ id: 'src/a.ts::entry', fanOut: 1 }), makeNode({ id: 'src/b.ts::leaf' })]);
+    store.insertEdges([synthEdge('src/a.ts::entry', 'src/b.ts::leaf')]);
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ edgeStore: store } as never);
+
+    const b = (await handleGetSubgraph(dir, 'entry', 'downstream', 2) as { confidenceBoundary: Boundary }).confidenceBoundary;
+    expect(b.complete).toBe(false);
+    expect(b.basis!.synthesizedEdges).toBeGreaterThanOrEqual(1);
+    expect(b.knownUnknowable![0].kind).toBe('synthesized-dispatch');
+  });
+});
+
+describe('confidenceBoundary wiring — handleAnalyzeImpact', () => {
+  let dir: string;
+  let store: EdgeStore;
+  afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+
+  it('reports complete with an all-direct impact neighborhood', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'cb-impact-'));
+    store = EdgeStore.open(join(dir, 'call-graph.db'));
+    store.insertNodes([makeNode({ id: 'src/a.ts::entry', fanOut: 1 }), makeNode({ id: 'src/b.ts::leaf', fanIn: 1 })]);
+    store.insertEdges([makeEdge('src/a.ts::entry', 'src/b.ts::leaf')]);
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ edgeStore: store } as never);
+
+    const b = (await handleAnalyzeImpact(dir, 'entry', 2) as { confidenceBoundary: Boundary }).confidenceBoundary;
+    expect(b.complete).toBe(true);
+    expect(b.basis!.synthesizedEdges).toBe(0);
+  });
+
+  it('reports incomplete when an edge inside the impact set is synthesized', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'cb-impact-'));
+    store = EdgeStore.open(join(dir, 'call-graph.db'));
+    store.insertNodes([makeNode({ id: 'src/a.ts::entry', fanOut: 1 }), makeNode({ id: 'src/b.ts::leaf', fanIn: 1 })]);
+    store.insertEdges([synthEdge('src/a.ts::entry', 'src/b.ts::leaf', 'route-handler')]);
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ edgeStore: store } as never);
+
+    const b = (await handleAnalyzeImpact(dir, 'entry', 2) as { confidenceBoundary: Boundary }).confidenceBoundary;
+    expect(b.complete).toBe(false);
+    expect(b.basis!.synthesizedByRule).toMatchObject({ 'route-handler': expect.any(Number) });
+    expect(b.knownUnknowable!.some(c => c.rule === 'route-handler')).toBe(true);
+  });
+});
+
+describe('confidenceBoundary wiring — handleTraceExecutionPath', () => {
+  it('reports complete on an all-direct path', async () => {
+    const nodes = [makeNode({ id: 'a.ts::p', fanOut: 1 }), makeNode({ id: 'b.ts::q', fanOut: 1 }), makeNode({ id: 'c.ts::r' })];
+    const edges = [makeEdge('a.ts::p', 'b.ts::q'), makeEdge('b.ts::q', 'c.ts::r')];
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: makeGraph(nodes, edges) } as never);
+
+    const b = (await handleTraceExecutionPath('/tmp/proj', 'p', 'r') as { confidenceBoundary: Boundary }).confidenceBoundary;
+    expect(b.complete).toBe(true);
+    expect(b.basis!.directEdges).toBeGreaterThanOrEqual(1);
+  });
+
+  it('reports incomplete when the returned path crosses a synthesized edge', async () => {
+    const nodes = [makeNode({ id: 'a.ts::p', fanOut: 1 }), makeNode({ id: 'b.ts::q', fanOut: 1 }), makeNode({ id: 'c.ts::r' })];
+    const edges = [makeEdge('a.ts::p', 'b.ts::q'), synthEdge('b.ts::q', 'c.ts::r', 'callback-registration')];
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: makeGraph(nodes, edges) } as never);
+
+    const b = (await handleTraceExecutionPath('/tmp/proj', 'p', 'r') as { confidenceBoundary: Boundary }).confidenceBoundary;
+    expect(b.complete).toBe(false);
+    expect(b.knownUnknowable!.some(c => c.rule === 'callback-registration')).toBe(true);
+  });
+
+  it('attaches a boundary even on the no-path result', async () => {
+    const nodes = [makeNode({ id: 'f.ts::x' }), makeNode({ id: 'f.ts::y' })];
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: makeGraph(nodes, []) } as never);
+
+    const r = await handleTraceExecutionPath('/tmp/proj', 'x', 'y') as { pathsFound: number; confidenceBoundary: Boundary };
+    expect(r.pathsFound).toBe(0);
+    expect(r.confidenceBoundary.complete).toBe(true); // empty basis, current index
+  });
+});
