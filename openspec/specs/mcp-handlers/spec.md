@@ -362,6 +362,56 @@ posture.
 - **GIVEN** a repository configured to block when a commit orphans an anchored decision
 - **WHEN** a commit would orphan an anchored decision
 - **THEN** the hook blocks; and for any other high-blast-radius diff it remains advisory
+### Requirement: ConfidenceBoundaryOnConclusions
+
+Every conclusion-shaped answer (`analyze_impact`, `find_path`, `find_dead_code`, `get_subgraph`,
+`select_tests`, `recall`, `trace_execution_path`) SHALL carry a deterministic `confidenceBoundary`
+describing its epistemic basis: the portion resting on directly-resolved edges, the portion resting on
+synthesized edges (named by their `synthesizedBy` rule), and any **known-unknowable** crossings — a
+traversal that passed a reflection or computed-dispatch boundary, or, under federation, an unindexed
+repository. The boundary SHALL be categorical labels and counts, never a blended confidence score, and
+SHALL be additive metadata that callers may ignore. It SHALL be computed without an LLM, from the
+edge `confidence`/`synthesizedBy` provenance already present (decision `08e71184`).
+
+#### Scenario: A clean answer reports a clean boundary
+
+- **GIVEN** a query answered entirely via directly-resolved edges against a current index
+- **WHEN** the response is produced
+- **THEN** its `confidenceBoundary` reports only directly-resolved basis, no known-unknowable crossing,
+  and `complete: true`
+
+#### Scenario: A boundary-crossing answer is flagged, not hidden
+
+- **GIVEN** a `find_dead_code` query whose liveness partition is reached only across a synthesized
+  (heuristically-recovered dispatch) edge
+- **WHEN** the response is produced
+- **THEN** the `confidenceBoundary` names the synthesized crossing as known-unknowable, breaks down the
+  synthesized edges by rule, and reports `complete: false`
+
+### Requirement: StalenessBoundary
+
+When graph-relevant source files have changed since the index's build commit, every conclusion SHALL
+carry a staleness marker naming that build commit and the count of source files changed since it,
+derived deterministically from `git diff` against the commit captured at analyze time. A current index
+(zero source files changed) SHALL produce no staleness marker. When staleness cannot be assessed
+reliably — no build commit was captured, or the project is not a git repository — the system SHALL
+stay silent rather than emit a false-positive marker.
+
+#### Scenario: A stale index is disclosed
+
+- **GIVEN** an index built at commit X and a working tree with N files changed since X
+- **WHEN** any conclusion is produced
+- **THEN** the response discloses "computed against the index at commit X; N file(s) changed since" and
+  reports `complete: false`
+
+> Decision recorded: 08e71184
+> Date: 2026-06-18
+### Requirement: ExcludeAllOpenloreprefixedDirsFromTheProjectFingerprintSoOpenloresOwnCachesDontInvalidateTheAnalysisCache
+
+The system SHALL exclude all directories whose name starts with `.openlore` from project fingerprint computation so that OpenLore-managed caches do not invalidate analysis freshness.
+
+> Decision recorded: cd5ff82c
+> Date: 2026-06-18
 
 ## Decisions
 
@@ -524,3 +574,32 @@ recall previously ranked memories by binary substring token-overlap, which silen
 The add-preflight-blast-radius-guard proposal is titled "pre-flight blast-radius guard," but `openlore preflight` already exists as an unrelated CI graph-staleness gate (src/cli/preflight/). Reusing the word "preflight" across both surfaces would conflate two different concerns. The new capability is named `blast_radius` everywhere to be collision-free and self-describing ("compute my diff's structural blast radius"). It is implemented as pure orchestration of existing deterministic analyses (analyze_impact, select_tests, check_spec_drift which already folds in anchored-memory + ADR drift, and getChangedFiles) composed into a single conclusion-shaped briefing — no new structural computation, no LLM. The MCP tool is classified `conclusion` and kept out of the `minimal` preset. The git hook is advisory-by-default (exit 0); opt-in blocking for named high-risk patterns reads `.openlore/config.json` `blastRadius.block`. The multi-repo-federation cross-repo-consumers input is scoped out (federation not yet shipped) and documented as a no-op with a note.
 
 **Consequences:** A new MCP tool `blast_radius` and CLI `openlore blast-radius` (with --install-hook, --hook, --json) ship; OpenLoreConfig gains an optional `blastRadius?: { block?: string[] }` field; a new advisory pre-commit hook block (marker `# openlore-blast-radius-hook`) installs alongside the decisions hook. Federation cross-repo consumers remain a documented gap until add-multi-repo-federation lands.
+### confidenceBoundary response shape: categorical edge-basis + known-unknowable crossings + staleness, never a blended score
+
+**Status:** Approved
+**Date:** 2026-06-18
+**ID:** 08e71184
+
+Every conclusion tool (analyze_impact, find_path, find_dead_code, get_subgraph, select_tests, trace_execution_path, recall) carries a deterministic `confidenceBoundary` computed from data already present: edge `confidence`/`synthesizedBy` provenance for the basis, synthesized-edge reliance for known-unknowable crossings, and the project fingerprint + git diff for staleness. The shape is categorical labels and counts (directEdges, synthesizedEdges, synthesizedByRule, knownUnknowable[], staleness, complete) — never a blended confidence number and never an LLM call, preserving the north-star (c6d1ad07). It is additive metadata: a caller that ignores it sees today's answer unchanged.
+
+**Consequences:** A new shared module src/core/services/mcp-handlers/confidence-boundary.ts owns the type and computation; seven conclusion handlers each spread a `confidenceBoundary` field into their response. analyze.ts's fingerprint.json gains an optional `commit` field (captured via git rev-parse at analyze time) so the staleness marker can name the build commit; staleness degrades gracefully (no commit / non-git repo → fingerprint-mismatch boolean without a commit name). `complete` is false whenever the computation leaned on a synthesized edge, crossed a known-unknowable boundary, or ran against a stale index — the answer-level NoFalseCompleteness contract.
+
+### Confidence-boundary staleness uses git-diff against the build commit, not a fingerprint-hash recompute
+
+**Status:** Approved
+**Date:** 2026-06-18
+**ID:** f0b7f99f
+
+Comparing the analyze-time project fingerprint (whole-tree mtime+size hash) against a query-time recompute is unreliable: fixture dirs and mtime drift cause false-positive staleness on every answer, training agents to ignore the marker. Replaced with a deterministic git signal: staleness fires iff `git diff --name-only <buildCommit>` reports graph-relevant source files changed since the index was built. Non-git repos and indexes with no captured commit get NO staleness marker (silent rather than false-positive) — a deliberate honesty tradeoff. This supersedes the "fingerprint-mismatch boolean" degradation described in decision 08e71184 above.
+
+**Consequences:** computeStaleness no longer calls computeProjectFingerprint; it reads the build commit from fingerprint.json and shells `git diff` (memoized 5s per dir). A pure buildStalenessMarker(commit, changedCount) holds the emit/silent logic and is unit-tested. The pre-existing fingerprint-includes-.openlore-live-cache bug that affects isCacheFresh is left untouched and flagged separately.
+
+### Exclude all .openlore-prefixed dirs from the project fingerprint so OpenLore's own caches don't invalidate the analysis cache
+
+**Status:** Approved
+**Date:** 2026-06-18
+**ID:** cd5ff82c
+
+computeProjectFingerprint walked .openlore-live-cache (the gitignored clone cache for live-data fixtures). Those foreign source files churn whenever the live-data MCP tools or integration tests run, so the content hash flapped even when the user's own source was unchanged — forcing needless full re-analysis and false staleness markers. Generalizing the directory skip from exact `.openlore` to any `.openlore`-prefixed name covers `.openlore`, `.openlore-live-cache`, and future OpenLore-managed dirs in one rule.
+
+**Consequences:** walkForFingerprint now skips directories whose name starts with `.openlore` in addition to the static FINGERPRINT_SKIP_DIRS set. The custom OPENLORE_LIVE_CACHE_DIR override (an arbitrary path) is not covered by the prefix rule — acceptable since the default is the in-repo `.openlore-live-cache`. A regression test asserts live-cache churn leaves the fingerprint unchanged while a real user-source edit still flips the hash.
