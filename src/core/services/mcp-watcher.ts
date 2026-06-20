@@ -185,6 +185,7 @@ export class McpWatcher {
 
   // ── Coalescing queue (Step 1) ──────────────────────────────────────────────
   private pending = new Set<string>();              // absolute paths awaiting a flush
+  private pendingDeletions = new Set<string>();     // absolute paths of unlinked files
   private debounceTimer?: ReturnType<typeof setTimeout>;
   private maxBatchTimer?: ReturnType<typeof setTimeout>;
   private running = false;                           // single-flight for the signature flush
@@ -248,10 +249,21 @@ export class McpWatcher {
         awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 50 },
       });
 
+      const watched = (p: string): boolean => SOURCE_EXTENSIONS.test(p) || HTML_EXTENSIONS.test(p);
       this.fsWatcher.on('change', (absPath: string) => {
-        if (SOURCE_EXTENSIONS.test(absPath) || HTML_EXTENSIONS.test(absPath)) {
-          this.enqueue(absPath);
-        }
+        if (watched(absPath)) this.enqueue(absPath);
+      });
+      // A new file is indexed via the same change pipeline (insert is a no-op
+      // delete + add). ignoreInitial:true means only files created AFTER start
+      // fire 'add', so the initial scan never storms this.
+      this.fsWatcher.on('add', (absPath: string) => {
+        if (watched(absPath)) this.enqueue(absPath);
+      });
+      // A deleted file must be removed from every lane (call graph, signatures,
+      // text-line index, vector index, dependency graph) — otherwise its symbols/
+      // edges/lines linger as phantom results until the next full analyze.
+      this.fsWatcher.on('unlink', (absPath: string) => {
+        if (watched(absPath)) this.enqueueDeletion(absPath);
       });
 
       this.fsWatcher.on('ready', () => resolve());
@@ -286,12 +298,19 @@ export class McpWatcher {
     if (this.maxBatchTimer) clearTimeout(this.maxBatchTimer);
     if (this.embedTimer) clearTimeout(this.embedTimer);
     this.debounceTimer = this.maxBatchTimer = this.embedTimer = undefined;
-    // Best-effort: persist anything still queued so a save right before shutdown
-    // is not lost.
-    if (this.pending.size > 0 && !this.running) {
-      const batch = Array.from(this.pending);
-      this.pending.clear();
-      try { await this.handleBatch(batch, { syncFlush: true }); } catch { /* ignore */ }
+    // Best-effort: drain anything still queued so a save/delete right before
+    // shutdown is not lost. Deletions first, then changes (same order as flush).
+    if (!this.running) {
+      if (this.pendingDeletions.size > 0) {
+        const dels = Array.from(this.pendingDeletions);
+        this.pendingDeletions.clear();
+        try { await this.handleDeletions(dels); } catch { /* ignore */ }
+      }
+      if (this.pending.size > 0) {
+        const batch = Array.from(this.pending);
+        this.pending.clear();
+        try { await this.handleBatch(batch, { syncFlush: true }); } catch { /* ignore */ }
+      }
     }
     await this.fsWatcher?.close();
     await this.gitWatcher?.close();
@@ -306,6 +325,20 @@ export class McpWatcher {
    */
   private enqueue(absPath: string): void {
     this.pending.add(absPath);
+    // A re-create supersedes a pending delete for the same path.
+    this.pendingDeletions.delete(absPath);
+    this.armFlush();
+  }
+
+  /** Queue a file deletion for the next flush (reuses the same debounce). */
+  private enqueueDeletion(absPath: string): void {
+    this.pendingDeletions.add(absPath);
+    // A delete supersedes a pending change for the same path.
+    this.pending.delete(absPath);
+    this.armFlush();
+  }
+
+  private armFlush(): void {
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     this.debounceTimer = setTimeout(() => this.flush(), this.debounceMs);
     if (!this.maxBatchTimer) {
@@ -332,16 +365,22 @@ export class McpWatcher {
     if (this.debounceTimer) { clearTimeout(this.debounceTimer); this.debounceTimer = undefined; }
     if (this.maxBatchTimer) { clearTimeout(this.maxBatchTimer); this.maxBatchTimer = undefined; }
     if (this.running) return;            // a follow-up is scheduled in finally{}
-    if (this.pending.size === 0) return;
+    if (this.pending.size === 0 && this.pendingDeletions.size === 0) return;
 
     const batch = Array.from(this.pending);
+    const deletions = Array.from(this.pendingDeletions);
     this.pending.clear();
+    this.pendingDeletions.clear();
     this.running = true;
-    this.handleBatch(batch)
+    // Deletions first (remove stale state), then re-index the changed/added files.
+    (async () => {
+      if (deletions.length > 0) await this.handleDeletions(deletions);
+      if (batch.length > 0) await this.handleBatch(batch);
+    })()
       .catch((err) => process.stderr.write(`[mcp-watcher] error: ${(err as Error).message}\n`))
       .finally(() => {
         this.running = false;
-        if (this.pending.size > 0) {
+        if (this.pending.size > 0 || this.pendingDeletions.size > 0) {
           this.debounceTimer = setTimeout(() => this.flush(), this.debounceMs);
         }
       });
@@ -472,10 +511,8 @@ export class McpWatcher {
 
     // 3.5. Literal-text line index — keep it fresh for the changed files
     //      (source + HTML). Runs regardless of the embed setting (BM25-only).
-    //      Note: there is no 'unlink' handler, so file DELETIONS are not
-    //      live-reconciled — a deleted file's lines linger until the next full
-    //      `analyze` overwrites the table (the same staleness every other watcher
-    //      lane carries for deletions).
+    //      File deletions are handled separately by handleDeletions (the 'unlink'
+    //      lane), which drops the removed file's lines from this index.
     await this.updateTextLines(changedFiles);
 
     // 3.6. Dependency graph — keep dependency-graph.json's file→file import edges
@@ -718,7 +755,7 @@ export class McpWatcher {
       // and re-serialize it, so untyped node fields not modeled here (file,
       // exports, cluster, metrics.pageRank/betweenness) survive the round-trip.
       const graph = JSON.parse(raw) as {
-        nodes: Array<{ id: string; metrics?: Record<string, number> }>;
+        nodes: Array<{ id: string; file?: { path: string; absolutePath: string }; exports?: unknown[]; metrics?: Record<string, number> }>;
         edges: Array<{ source: string; target: string; httpEdge?: unknown; isCallEdge?: boolean }>;
       };
       if (!Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) return;
@@ -731,12 +768,19 @@ export class McpWatcher {
 
       for (const f of changedFiles) {
         const abs = join(this.rootPath, f.rel);
-        if (!fileSet.has(abs)) continue; // new file — a full analyze adds the node
         let analysis;
         try {
           analysis = await parser.parseFile(abs);
         } catch {
           continue;
+        }
+        if (!fileSet.has(abs)) {
+          // New file (watch 'add'): create a node so its OUTGOING imports are
+          // tracked. Added AFTER a successful parse so a parse failure can't leave
+          // a bogus edgeless node. Incoming edges (importers of this file) refresh
+          // when those importers are next touched, or on the next full analyze.
+          graph.nodes.push({ id: abs, file: { path: f.rel, absolutePath: abs }, exports: [], metrics: { inDegree: 0, outDegree: 0 } });
+          fileSet.add(abs);
         }
         const newEdges = await computeFileImportEdges(abs, analysis, fileSet, this.rootPath);
         // Drop this file's previous IMPORT edges (keep HTTP / call-synthesized
@@ -778,6 +822,125 @@ export class McpWatcher {
       }
     } catch (err) {
       process.stderr.write(`[mcp-watcher] dependency-graph error: ${(err as Error).message}\n`);
+    }
+  }
+
+  /**
+   * Reconcile file DELETIONS across every lane so a removed file leaves no
+   * phantom state: call-graph nodes/edges (incoming and outgoing), signatures,
+   * text-line rows, vector rows, and dependency-graph node + edges. Best-effort;
+   * a failure in one lane does not block the others.
+   */
+  private async handleDeletions(absPaths: string[]): Promise<void> {
+    // Deletion is idempotent removal, so no need to filter — each lane no-ops for
+    // a path it never indexed. (Watch-ignored paths like *.test.ts never reach
+    // here anyway: chokidar prunes them, so no unlink fires.)
+    const rels = absPaths.map((abs) => relative(this.rootPath, abs));
+    if (rels.length === 0) return;
+
+    // 1. Call-graph store — deleteEdgesForFile removes edges where the file is
+    //    caller OR callee, so incoming edges don't dangle.
+    if (EdgeStore.exists(this.outputPath)) {
+      const store = EdgeStore.open(EdgeStore.dbPath(this.outputPath));
+      try {
+        store.transaction(() => {
+          for (const rel of rels) {
+            store.deleteEdgesForFile(rel);
+            store.deleteNodesForFile(rel);
+            store.deleteCfgForFile(rel);
+            store.deleteClassesForFile(rel);
+          }
+        });
+      } catch (err) {
+        process.stderr.write(`[mcp-watcher] delete (graph) error: ${(err as Error).message}\n`);
+      } finally {
+        store.close();
+      }
+    }
+
+    // 2. Signatures in llm-context.json.
+    const context = await this.loadContext();
+    if (context?.signatures) {
+      const relSet = new Set(rels);
+      const kept = context.signatures.filter((m) => !relSet.has(m.path));
+      if (kept.length !== context.signatures.length) {
+        context.signatures = kept;
+        await this.persistContext(context);
+      }
+    }
+
+    // 3. Text-line index — drop the deleted files' lines.
+    try {
+      const { TextLineIndex } = await import('../analyzer/text-line-index.js');
+      if (TextLineIndex.exists(this.outputPath)) {
+        await TextLineIndex.updateFiles(this.outputPath, [], rels);
+      }
+    } catch (err) {
+      process.stderr.write(`[mcp-watcher] delete (text) error: ${(err as Error).message}\n`);
+    }
+
+    // 4. Vector index — delete the deleted files' rows (no nodes to add).
+    try {
+      const { VectorIndex } = await import('../analyzer/vector-index.js');
+      if (VectorIndex.exists(this.outputPath)) {
+        await VectorIndex.updateFiles(
+          this.outputPath, [], new Set(rels), context?.signatures ?? [],
+          new Set(), new Set(), undefined,
+        );
+      }
+    } catch (err) {
+      process.stderr.write(`[mcp-watcher] delete (vector) error: ${(err as Error).message}\n`);
+    }
+
+    // 5. Dependency graph — remove the deleted nodes and every edge touching them.
+    await this.removeFromDependencyGraph(absPaths);
+
+    if (this.debug) {
+      process.stderr.write(`[mcp-watcher] reconciled ${rels.length} deletion(s)\n`);
+    }
+  }
+
+  /**
+   * Remove deleted files' nodes and any edge referencing them from
+   * dependency-graph.json, recompute degrees, and persist atomically.
+   */
+  private async removeFromDependencyGraph(absPaths: string[]): Promise<void> {
+    const graphPath = join(this.outputPath, ARTIFACT_DEPENDENCY_GRAPH);
+    try {
+      let raw: string;
+      try {
+        raw = await readFile(graphPath, 'utf-8');
+      } catch {
+        return;
+      }
+      const graph = JSON.parse(raw) as {
+        nodes: Array<{ id: string; metrics?: Record<string, number> }>;
+        edges: Array<{ source: string; target: string }>;
+      };
+      if (!Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) return;
+
+      const removed = new Set(absPaths);
+      const nodesBefore = graph.nodes.length;
+      graph.nodes = graph.nodes.filter((n) => !removed.has(n.id));
+      const edgesBefore = graph.edges.length;
+      graph.edges = graph.edges.filter((e) => !removed.has(e.source) && !removed.has(e.target));
+      if (graph.nodes.length === nodesBefore && graph.edges.length === edgesBefore) return;
+
+      const out = new Map<string, Set<string>>();
+      const inn = new Map<string, Set<string>>();
+      for (const n of graph.nodes) { out.set(n.id, new Set()); inn.set(n.id, new Set()); }
+      for (const e of graph.edges) { out.get(e.source)?.add(e.target); inn.get(e.target)?.add(e.source); }
+      for (const n of graph.nodes) {
+        if (!n.metrics) n.metrics = {};
+        n.metrics.outDegree = out.get(n.id)?.size ?? 0;
+        n.metrics.inDegree = inn.get(n.id)?.size ?? 0;
+      }
+
+      const tmp = `${graphPath}.${process.pid}.tmp`;
+      await writeFile(tmp, JSON.stringify(graph));
+      await rename(tmp, graphPath);
+    } catch (err) {
+      process.stderr.write(`[mcp-watcher] delete (dep-graph) error: ${(err as Error).message}\n`);
     }
   }
 

@@ -64,6 +64,49 @@ describe('E2E: dependency graph stays live in watch mode', () => {
     expect(targets.some((p) => p.endsWith('b.ts')), 'a.ts should no longer import b.ts').toBe(false);
   }, 30_000);
 
+  it('reflects a file deletion through analyze → watch → get_file_dependencies', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ol-delwatch-e2e-'));
+    dirs.push(root);
+    const out = join(root, '.openlore', 'analysis');
+    await writeFile(join(root, 'a.ts'), "import { x } from './b';\nexport const y = x;\n", 'utf-8');
+    await writeFile(join(root, 'b.ts'), 'export const x = 1;\n', 'utf-8');
+    await runAnalysis(root, out, { maxFiles: 100, include: [], exclude: [] });
+
+    // Sanity: b.ts is imported-by a.ts.
+    const before = await handleGetFileDependencies(root, 'b.ts', 'importedBy') as { importedBy?: Array<{ filePath: string }> };
+    expect((before.importedBy ?? []).some((i) => i.filePath.endsWith('a.ts'))).toBe(true);
+
+    const watcher = new McpWatcher({ rootPath: root, outputPath: out, debounceMs: 100 });
+    watchers.push(watcher);
+    await watcher.start();
+    await rm(join(root, 'a.ts')); // fires unlink
+    await wait(600);
+
+    // a.ts is gone everywhere: no longer an importer of b.ts, and its own node is gone.
+    const after = await handleGetFileDependencies(root, 'b.ts', 'importedBy') as { importedBy?: Array<{ filePath: string }> };
+    expect((after.importedBy ?? []).some((i) => i.filePath.endsWith('a.ts')), 'a.ts should no longer import b.ts').toBe(false);
+    const gone = await handleGetFileDependencies(root, 'a.ts', 'imports') as { error?: string };
+    expect(gone.error, 'a.ts node should be removed from the graph').toBeDefined();
+  }, 30_000);
+
+  it('reflects a newly created file through watch → get_file_dependencies', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ol-addwatch-e2e-'));
+    dirs.push(root);
+    const out = join(root, '.openlore', 'analysis');
+    await writeFile(join(root, 'b.ts'), 'export const x = 1;\n', 'utf-8');
+    await runAnalysis(root, out, { maxFiles: 100, include: [], exclude: [] });
+
+    const watcher = new McpWatcher({ rootPath: root, outputPath: out, debounceMs: 100 });
+    watchers.push(watcher);
+    await watcher.start();
+    // Create a brand-new file importing the existing one.
+    await writeFile(join(root, 'a.ts'), "import { x } from './b';\nexport const y = x;\n", 'utf-8');
+    await wait(600);
+
+    const r = await handleGetFileDependencies(root, 'a.ts', 'imports');
+    expect(importTargets(r).some((p) => p.endsWith('b.ts')), 'new a.ts should import b.ts').toBe(true);
+  }, 30_000);
+
   it('reflects an HTML <script src> re-point live', async () => {
     const root = await mkdtemp(join(tmpdir(), 'ol-htmlwatch-e2e-'));
     dirs.push(root);
