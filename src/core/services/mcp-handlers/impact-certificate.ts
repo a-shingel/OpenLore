@@ -436,7 +436,10 @@ export function detectNewlyOpenedPaths(
   const preFwd = applyDelta(base, delta.removed, delta.added); // mirror: pre = base − added + removed
   const postRev = reverse(postFwd);
   const preRev = reverse(preFwd);
-  const nameOf = (id: string): string => cg.nodes.find(n => n.id === id)?.name ?? id;
+  // A newly-added caller is not in the indexed graph yet, so fall back to the bare
+  // symbol name parsed from its path-based id (`file::name`) rather than the raw id.
+  const nameById = new Map(cg.nodes.map(n => [n.id, n.name] as const));
+  const nameOf = (id: string): string => nameById.get(id) ?? id.split('::').pop() ?? id;
 
   const out: NewlyOpenedPath[] = [];
   for (const surface of surfaces) {

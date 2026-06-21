@@ -1,10 +1,25 @@
 # Change impact certificate: certify what a proposed change touches, before it touches it
 
-> Status: PROPOSED (2026-06-21). Third of three in `SPEC-STORE-INTEGRATION.md`. Builds on
-> `add-working-set-context-briefing` (the targets and scope), `blast_radius`
-> (`add-preflight-blast-radius-guard`), reachability (`analyze_impact`, `find_path`), declared
-> covering surfaces (new, below), and the code-anchored freshness lease
-> (`add-code-anchored-memory-staleness`).
+> Status: IMPLEMENTED (2026-06-21) — shipped on branch `feat/change-impact-certificate`, stacked on
+> `feat/working-set-context-briefing` (PR #180). All five "What changes" items and all six task
+> sections are built; spec deltas below are merged into `mcp-handlers` + `cli`. Decision: `187224b0`.
+> Third of three in `SPEC-STORE-INTEGRATION.md`. Builds on `add-working-set-context-briefing` (binding +
+> change resolution), `blast_radius` (`add-preflight-blast-radius-guard`, reused verbatim for blast
+> radius / tests / drift), reachability (`analyze_impact`, `find_path`), declared covering surfaces
+> (new, below), and the code-anchored freshness lease (`add-code-anchored-memory-staleness`).
+>
+> **One scoped deviation from the draft, recorded under decision `187224b0`:** the post-change graph is
+> derived by a bounded *differential edge-delta over the changed files* (the same primitive
+> `structural_diff` uses), NOT via the incremental dependency graph
+> (`add-watch-incremental-dependency-graph`), which is still a DRAFT/unbuilt. A new call edge can only
+> originate from a changed file, so re-parsing only the changed files at base vs working tree and
+> adjusting the canonical adjacency both ways (post = canonical + added − removed, pre = canonical −
+> added + removed) detects every newly-opened path without a full rebuild and without that dependency.
+> The deviation is a *mechanism* substitution; every requirement below holds. Verified e2e against this
+> repo: a controlled edit opening a path into a `critical` surface produced the expected
+> `surface-critical` finding, the hook blocked under `block: ["critical"]` and stayed advisory (exit 0)
+> without it, and editing an anchored symbol turned a persisted certificate stale (see
+> `DOGFOOD-change-impact-certificate.md`).
 
 ## Why
 
