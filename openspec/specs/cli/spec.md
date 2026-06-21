@@ -652,7 +652,8 @@ The system SHALL provide a CLI command `openlore working-set context` that assem
 working-set structural briefing for an active change in a configured spec-store binding. The command
 SHALL accept the change to brief (`--change <id>`) and SHALL support a `--json` flag whose output is
 documented in the agent-facing contract, so an external orchestrator can request the briefing and splice
-it into the context it hands its agent. The command SHALL be read-only and SHALL exit zero whether or not
+it into the context it hands its agent. The command MAY accept an optional token budget (`--token-budget
+<n>`) bounding the merged briefing. The command SHALL be read-only and SHALL exit zero whether or not
 the change is briefable; it SHALL NOT block any workflow.
 
 #### Scenario: Briefing emitted as machine-readable context

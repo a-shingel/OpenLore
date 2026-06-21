@@ -118,9 +118,41 @@ default 8000; change ids with spaces / nonexistent → `change-not-found`; every
 Each fix is now pinned by a test in `working-set.test.ts` (traversal-leak, CRLF, heading-leak,
 surrogate) — the suite had no coverage for these before.
 
+## Round 2 — spec-compliance audit + deeper hostile e2e
+
+A spec-compliance pass (every SHALL/Scenario in the canonical specs cross-checked against the code) found
+the feature fully wired (handler → dispatch → MCP inputSchema → CLI), with **one behavioral-compliance
+defect** plus new edge cases — all fixed and re-verified:
+
+- **Anchored-intent freshness was inverted (fixed).** The spec says "orphaned intent SHALL be withheld;
+  drifted intent SHALL be flagged." The handler had mapped orient's `staleDecisions` → `verdict:'drifted'`,
+  but orient's `staleDecisions` contains ONLY *orphaned* anchors (`orient.ts:477`), and genuinely *drifted*
+  decisions stay in `pendingDecisions` (`verify:true`/`freshness:'drifted'`). So orphaned intent was being
+  surfaced (mislabeled "drifted") and truly-drifted intent never appeared. Fixed: anchored intent now
+  derives from `orient.pendingDecisions` (per-decision freshness, orphaned excluded by construction) — the
+  briefing flags drifted and withholds orphaned, matching the spec. The docs already described the correct
+  behavior; only the code was wrong. Decision `7ef4710f`. Verified against the real index:
+  ```
+  $ openlore working-set context --change real-change --json     # OpenLore repo as target
+  anchoredIntent: [(5a27d292,current,"Adopt agent behavioral governa…"),
+                   (39c187ff,current,"Keep panic policy in config…"),
+                   (b65df761,current,"Confine working-set change ID…")]   # real in-scope decisions, verdicts
+  ```
+- **Symlink-escape change id (already blocked, now pinned).** A change dir symlinked OUT of the store
+  (`<store>/openspec/changes/evil-link → <scratch>/secret`) returns `change-not-found` and leaks nothing —
+  `safeJoin` canonicalizes symlinks. Confirmed: `codes: ['change-not-found'] LEAK? False`.
+- **Missing store path + valid change → graceful.** `binding-unsound` + `change-not-found`, `ready:false`.
+- **Vector index deleted while federation still says `indexed` → `orient-unavailable`.** A target whose
+  fingerprint matches the registry but whose `.openlore/analysis` vector index is gone degrades to
+  `orient-unavailable` + `no-briefable-targets`, `briefed:false`, never throwing.
+- **MCP dispatch path drives `change` + `tokenBudget`.** Via `dispatchTool('working_set_context', …)`:
+  full briefing = 5 items; `tokenBudget:200` = 1 item + `omissionNote`; the change id reaches the handler.
+  An MCP client can fully drive the tool, not just the CLI.
+
 ## Verdict
 
-✅ End-to-end working against a real index, and hardened against hostile change ids and proposals. The
+✅ End-to-end working against a real index, spec-compliant, and hardened against hostile change ids and
+proposals. The
 briefing is deterministic, conclusion-shaped, per-target-attributed, token-budgeted with an honest
 omission note, and folds in fresh anchored intent (orphaned withheld, drifted flagged). No LLM enters the
 path — the north star (`c6d1ad07`) holds.

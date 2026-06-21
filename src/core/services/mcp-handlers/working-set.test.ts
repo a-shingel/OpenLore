@@ -135,8 +135,14 @@ describe('briefTargetFromOrient', () => {
     insertionPoints: [
       { name: 'handleX', filePath: 'src/x.ts', strategy: 'extend_entry_point' },
     ],
-    governingDecisions: [{ id: 'd1', title: 'Use JWTs', status: 'approved' }],
-    staleDecisions: [{ id: 'd2', title: 'Old cache policy', status: 'approved' }],
+    // orient's pendingDecisions: a fresh one, a drifted one (freshness), and one
+    // flagged only via `verify`. Orphaned anchors NEVER appear here (orient routes
+    // them to staleDecisions, which the handler deliberately does not consume).
+    pendingDecisions: [
+      { id: 'd1', title: 'Use JWTs', status: 'approved', freshness: 'fresh' },
+      { id: 'd2', title: 'Old cache policy', status: 'approved', freshness: 'drifted' },
+      { id: 'd3', title: 'Verify me', status: 'draft', verify: true },
+    ],
   };
 
   it('attributes every item to its target and maps callers + spec domains', () => {
@@ -149,18 +155,25 @@ describe('briefTargetFromOrient', () => {
     expect(brief.specDomains).toEqual(['api']);
   });
 
-  it('marks governing decisions current and stale decisions drifted; never invents orphaned intent', () => {
+  it('flags drifted (or verify-marked) anchored intent and marks the rest current', () => {
     const { brief } = briefTargetFromOrient('api', orient);
     const current = brief.anchoredIntent.filter(a => a.verdict === 'current');
     const drifted = brief.anchoredIntent.filter(a => a.verdict === 'drifted');
     expect(current.map(a => a.id)).toEqual(['d1']);
-    expect(drifted.map(a => a.id)).toEqual(['d2']);
+    expect(drifted.map(a => a.id)).toEqual(['d2', 'd3']); // freshness:'drifted' AND verify:true
   });
 
-  it('an orient with no governing decisions briefs no current intent (orphaned withheld upstream)', () => {
-    const { brief } = briefTargetFromOrient('api', { relevantFunctions: [], staleDecisions: [{ id: 'o1', title: 'orphan' }] });
-    expect(brief.anchoredIntent.filter(a => a.verdict === 'current')).toHaveLength(0);
-    expect(brief.anchoredIntent.filter(a => a.verdict === 'drifted')).toHaveLength(1);
+  // Spec: "orphaned intent SHALL be withheld." Orphaned anchors live in orient's
+  // staleDecisions, which the handler does not consume — so they never appear here,
+  // and they are NEVER presented as current.
+  it('withholds orphaned intent entirely (orient routes it away from pendingDecisions)', () => {
+    const { brief } = briefTargetFromOrient('api', {
+      relevantFunctions: [],
+      // an orphaned decision would only ever arrive via staleDecisions/governingDecisions,
+      // neither of which the handler reads; pendingDecisions is empty here.
+      pendingDecisions: [],
+    });
+    expect(brief.anchoredIntent).toHaveLength(0);
   });
 });
 

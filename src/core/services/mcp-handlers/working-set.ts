@@ -12,10 +12,10 @@
  *     source of truth for which targets are briefable);
  *   - `handleOrient` runs task-scoped orientation against each indexed target,
  *     keyed on the change's extracted intent;
- *   - anchored-intent freshness is free: orient already returns `governingDecisions`
- *     (fresh, in-scope) and `staleDecisions` (drifted), and NEVER serves an
- *     orphaned anchor as authoritative — so orphaned intent is withheld by
- *     construction;
+ *   - anchored-intent freshness is free: orient's `pendingDecisions` are the in-scope
+ *     authoritative decisions each carrying a freshness verdict, with orphaned anchors
+ *     already excluded — so the briefing flags drifted intent and withholds orphaned
+ *     by construction;
  *   - the merged briefing is ranked by orient's score and bounded with the shared
  *     `applyTokenBudget` / `omissionNote` helpers (add-trust-calibrated-context-economy).
  *
@@ -134,16 +134,27 @@ export interface OrientView {
   callPaths?: Array<{ function: string; filePath: string; callers?: Array<{ name: string }> }>;
   specDomains?: Array<{ domain: string }>;
   insertionPoints?: Array<{ name: string; filePath: string; strategy: string }>;
-  governingDecisions?: Array<{ id: string; title: string; status: string }>;
-  staleDecisions?: Array<{ id: string; title: string; status?: string }>;
+  // Orient's in-scope authoritative anchored decisions, each carrying a freshness
+  // verdict. Orient EXCLUDES orphaned anchors from this set (they go to
+  // `staleDecisions`, which we deliberately do not consume) and flags a moved anchor
+  // with `freshness: 'drifted'` / `verify: true`. This is the single source of
+  // anchored intent: it withholds orphaned by construction and flags drifted.
+  pendingDecisions?: Array<{ id: string; title: string; status?: string; freshness?: string; verify?: boolean }>;
 }
 
 /**
  * Project ONE target's orient result into briefing items (per-target attributed)
  * plus its target brief (insertion points, spec domains, anchored intent). Pure —
- * the testable core of the per-target transformation, no I/O. Orphaned anchors are
- * already withheld by orient (absent from `governingDecisions`), so they never
- * appear as current intent here; `staleDecisions` are surfaced flagged as drifted.
+ * the testable core of the per-target transformation, no I/O.
+ *
+ * Anchored intent comes from orient's `pendingDecisions` (the in-scope authoritative
+ * set with per-decision freshness): a `drifted`/`verify` decision is flagged
+ * `verdict: 'drifted'`, everything else is `current`. Orphaned anchors never reach
+ * this set — orient withholds them — so the spec's "orphaned intent SHALL be
+ * withheld" holds by construction. (We do NOT read orient's `governingDecisions` or
+ * `staleDecisions`: the former is a file-level graph join that can include an
+ * orphaned decision, and the latter IS the orphaned bucket — both would surface
+ * orphaned intent the spec says to withhold.)
  */
 export function briefTargetFromOrient(
   targetName: string,
@@ -166,14 +177,12 @@ export function briefTargetFromOrient(
     specDomains: fnDomains,
   }));
 
-  const anchoredIntent: AnchoredIntent[] = [
-    ...(orient.governingDecisions ?? []).map(d => ({
-      id: d.id, title: d.title, status: d.status, verdict: 'current' as const,
-    })),
-    ...(orient.staleDecisions ?? []).map(d => ({
-      id: d.id, title: d.title, status: d.status ?? 'unknown', verdict: 'drifted' as const,
-    })),
-  ];
+  const anchoredIntent: AnchoredIntent[] = (orient.pendingDecisions ?? []).map(d => ({
+    id: d.id,
+    title: d.title,
+    status: d.status ?? 'unknown',
+    verdict: d.freshness === 'drifted' || d.verify ? 'drifted' as const : 'current' as const,
+  }));
 
   return {
     items,
