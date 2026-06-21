@@ -5,7 +5,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createTracker, updateTracker, updatePanic, injectFreshness, getSourceRoots, trackerToPanicState } from './epistemic-lease.js';
+import { createTracker, updateTracker, updatePanic, resetPanicOnOrient, injectFreshness, getSourceRoots, trackerToPanicState } from './epistemic-lease.js';
 import type { EpistemicTracker } from './epistemic-lease.js';
 
 // ============================================================================
@@ -16,9 +16,13 @@ vi.mock('node:child_process', () => ({
   spawnSync: vi.fn(() => ({ stdout: 'deadbeef1234\n', status: 0 })),
 }));
 
+// Spy on telemetry emit so we can assert the freshness path never emits panic-domain events.
+vi.mock('../telemetry.js', () => ({ emit: vi.fn() }));
 
 import { spawnSync } from 'node:child_process';
 const mockSpawnSync = vi.mocked(spawnSync);
+import { emit } from '../telemetry.js';
+const mockEmit = vi.mocked(emit);
 
 // ============================================================================
 // HELPERS
@@ -669,12 +673,21 @@ describe('user-facing lease description is neutral, not coercive', () => {
 // after updateTracker() when they want to observe panic scoring behavior.
 // ============================================================================
 
+// Mirrors the real MCP-path flow (mcp.ts): updateTracker (freshness) always runs;
+// orient() runs panic recovery via resetPanicOnOrient(), every other tool runs updatePanic().
 function callBoth(t: EpistemicTracker, tool: string, dir: string, filePath?: string): void {
   updateTracker(t, tool, dir, filePath);
-  // orient is handled by resetTracker() internally; do not double-apply panic scoring.
-  if (tool !== 'orient') {
+  if (tool === 'orient') {
+    resetPanicOnOrient(t, dir);
+  } else {
     updatePanic(t, { density: t.density, oscillation: t.oscillation, weight: 1, staleDepth: t.staleDepth, directory: dir, tool });
   }
+}
+
+// Panic recovery on orient(), as the MCP path applies it (mode != 'off').
+function orient(t: EpistemicTracker, dir: string): void {
+  updateTracker(t, 'orient', dir);
+  resetPanicOnOrient(t, dir);
 }
 
 // ============================================================================
@@ -749,7 +762,7 @@ describe('panic — orient spam protection', () => {
     const t = freshTracker();
     t.panicScore = 50;
     vi.advanceTimersByTime(3 * 60 * 1000); // 3min gap
-    updateTracker(t, 'orient', '/fake/repo');
+    orient(t, '/fake/repo');
     expect(t.panicScore).toBe(10); // 50 - 40
   });
 
@@ -759,7 +772,7 @@ describe('panic — orient spam protection', () => {
     // Simulate a prior orient 30s ago so the next orient is "rapid"
     t.lastOrientResetAt = Date.now() - 30_000;
     t.recentOrientCount = 1;
-    updateTracker(t, 'orient', '/fake/repo');
+    orient(t, '/fake/repo');
     expect(t.panicScore).toBe(35); // 50 - 15
   });
 
@@ -769,7 +782,7 @@ describe('panic — orient spam protection', () => {
     // Simulate 2 prior rapid orients (count already 2)
     t.lastOrientResetAt = Date.now() - 30_000;
     t.recentOrientCount = 2;
-    updateTracker(t, 'orient', '/fake/repo'); // count=3 → spam, delta=0
+    orient(t, '/fake/repo'); // count=3 → spam, delta=0
     expect(t.panicScore).toBe(50); // no change
   });
 
@@ -781,7 +794,7 @@ describe('panic — orient spam protection', () => {
     t.recentOrientCount = 2;
     // Now advance 3min — next orient will be non-rapid
     vi.advanceTimersByTime(3 * 60 * 1000);
-    updateTracker(t, 'orient', '/fake/repo'); // counter reset to 0, +1 = 1, non-rapid → -40
+    orient(t, '/fake/repo'); // counter reset to 0, +1 = 1, non-rapid → -40
     expect(t.panicScore).toBe(10); // 50 - 40
     expect(t.recentOrientCount).toBe(1);
   });
@@ -790,7 +803,7 @@ describe('panic — orient spam protection', () => {
     const t = freshTracker();
     t.panicScore = 10;
     vi.advanceTimersByTime(3 * 60 * 1000);
-    updateTracker(t, 'orient', '/fake/repo'); // -40 would give -30, clamped to 0
+    orient(t, '/fake/repo'); // -40 would give -30, clamped to 0
     expect(t.panicScore).toBe(0);
   });
 });
@@ -882,7 +895,7 @@ describe('panic — refractory period after orient()', () => {
     const t = freshTracker();
     t.panicScore = 50;
     vi.advanceTimersByTime(3 * 60 * 1000);
-    updateTracker(t, 'orient', '/fake/repo'); // -40 → score=10, refractory set
+    orient(t, '/fake/repo'); // -40 → score=10, refractory set
     expect(t.panicRecoverySuppressionUntil).toBeGreaterThan(Date.now());
   });
 
@@ -891,7 +904,7 @@ describe('panic — refractory period after orient()', () => {
     t.panicScore = 50;
     t.lastOrientResetAt = Date.now() - 30_000;
     t.recentOrientCount = 2; // 3rd rapid → spam → delta=0
-    updateTracker(t, 'orient', '/fake/repo');
+    orient(t, '/fake/repo');
     expect(t.panicRecoverySuppressionUntil).toBe(0); // not set
   });
 
@@ -899,7 +912,7 @@ describe('panic — refractory period after orient()', () => {
     const t = freshTracker();
     t.panicScore = 50;
     vi.advanceTimersByTime(3 * 60 * 1000);
-    updateTracker(t, 'orient', '/fake/repo'); // sets refractory
+    orient(t, '/fake/repo'); // sets refractory
     const scoreAfterOrient = t.panicScore;
 
     // Now trigger high density + oscillation conditions
@@ -918,7 +931,7 @@ describe('panic — refractory period after orient()', () => {
     const t = freshTracker();
     t.panicScore = 50;
     vi.advanceTimersByTime(3 * 60 * 1000);
-    updateTracker(t, 'orient', '/fake/repo'); // sets refractory
+    orient(t, '/fake/repo'); // sets refractory
     const scoreAfterOrient = t.panicScore;
 
     // Advance past the 45s refractory window
@@ -1040,5 +1053,46 @@ describe('trackerToPanicState', () => {
     const state = trackerToPanicState(t);
     expect(state.agentId).toBeUndefined();
     expect(state.sessionId).toBeUndefined();
+  });
+});
+
+// ============================================================================
+// Regression: panic telemetry must NOT leak into the always-run freshness path
+// (dogfood finding — mode:'off' wrote panic.jsonl because resetTracker emitted
+//  panic_orient_reset. Panic emit now lives in resetPanicOnOrient, which the MCP
+//  path calls only when panic mode != 'off'.)
+// ============================================================================
+
+describe('panic telemetry is gated out of the freshness path', () => {
+  const panicEmits = () => mockEmit.mock.calls.filter(c => c[1] === 'panic');
+
+  it('updateTracker(orient) emits NO panic-domain telemetry', () => {
+    const t = freshTracker();
+    t.freshnessState = 'degraded';
+    t.panicScore = 50;
+    mockEmit.mockClear();
+    updateTracker(t, 'orient', '/fake/repo');
+    expect(panicEmits()).toHaveLength(0);
+    // freshness reset still happened
+    expect(t.freshnessState).toBe('fresh');
+    // panic score is untouched by the freshness path
+    expect(t.panicScore).toBe(50);
+  });
+
+  it('updateTracker(non-orient) emits NO panic-domain telemetry', () => {
+    const t = freshTracker();
+    mockEmit.mockClear();
+    updateTracker(t, 'search_code', '/fake/repo', 'src/a/x.ts');
+    expect(panicEmits()).toHaveLength(0);
+  });
+
+  it('resetPanicOnOrient IS where panic_orient_reset is emitted', () => {
+    const t = freshTracker();
+    t.panicScore = 50;
+    mockEmit.mockClear();
+    resetPanicOnOrient(t, '/fake/repo');
+    const pe = panicEmits();
+    expect(pe.length).toBeGreaterThanOrEqual(1);
+    expect(pe.some(c => (c[2] as { event?: string }).event === 'panic_orient_reset')).toBe(true);
   });
 });

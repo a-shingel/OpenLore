@@ -477,10 +477,16 @@ export function createTracker(directory: string): EpistemicTracker {
   };
 }
 
-function resetTracker(tracker: EpistemicTracker, directory: string): void {
+/**
+ * Panic recovery on orient() — orient spam protection + score reduction + refractory.
+ * Policy-gated: the caller (mcp.ts) invokes this ONLY when panic mode != 'off', so no
+ * panic scoring or panic telemetry occurs in the default (off) path. Kept separate from
+ * resetTracker() (freshness reset, which always runs) so freshness and panic stay decoupled.
+ */
+export function resetPanicOnOrient(tracker: EpistemicTracker, directory: string): void {
   const now = Date.now();
 
-  // Panic: orient spam protection — diminishing recovery bonus on rapid reuse
+  // Orient spam protection — diminishing recovery bonus on rapid reuse
   const timeSinceLastOrient = now - tracker.lastOrientResetAt;
   if (timeSinceLastOrient >= RAPID_ORIENT_INTERVAL_MS) {
     tracker.recentOrientCount = 0; // non-rapid: reset spam counter
@@ -526,7 +532,13 @@ function resetTracker(tracker: EpistemicTracker, directory: string): void {
     recent_orient_count: tracker.recentOrientCount,
     time_since_last_ms: tracker.lastOrientResetAt === now ? timeSinceLastOrient : 0,
   });
+}
 
+function resetTracker(tracker: EpistemicTracker, directory: string): void {
+  const now = Date.now();
+  // Freshness reset only. Panic recovery is handled separately by resetPanicOnOrient(),
+  // which the MCP path calls only when panic mode != 'off' — so the default (off) path
+  // performs no panic scoring and emits no panic telemetry on orient().
   tracker.lastOrientAt = new Date();
   tracker.graphVersionAtOrient = getGitHash(directory);
   tracker.cognitiveLoad = 0;
