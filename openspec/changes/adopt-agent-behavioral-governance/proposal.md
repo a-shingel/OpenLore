@@ -1,0 +1,106 @@
+# Adopt the agent behavioral governance layer (from PR #83), staged toward the memory north star
+
+> Status: IN PROGRESS (2026-06-21) — adopting `laurentftech`'s Panic Response Layer (PR #83,
+> `feat/panic-response-layer`, ~3,822 LOC) onto current `main`. PR #83 was opened against `v2.0.1`
+> and is 513 commits stale; it does not merge or compile cleanly as-is. This change rebases the work
+> onto current `main`, lands a **helpful core behind safe defaults**, and **stages the heavy machinery
+> into follow-ups** so we never ship intervention before we have validated it is accurate.
+> Work branch: `feat/agent-behavioral-governance`.
+
+## Why
+
+OpenLore's true north is to be the **persistent memory and context layer that feeds AI agents useful
+data so they do less labor, spend fewer tokens, and develop faster**. Everything we ship is judged
+against that.
+
+OpenLore *already* governs agents through one channel: EpistemicLease tracks per-agent behavioral
+state and injects a freshness/staleness signal into every MCP tool response
+(`getFreshnessSignal(tracker)` in `mcp.ts`). "Your index is stale, re-orient" is a nudge we already
+emit, and it already rides on the `EpistemicTracker`. PR #83's Panic Response Layer is built on the
+**same** `EpistemicTracker` and injects through the **same** content-item surface. So this is an
+*extension of governance we already do*, not a pivot to a new product.
+
+The distinction that matters: a freshness signal is a **fact** (the index commit moved), cheap to
+trust. A panic signal is a **judgment** ("you appear to be thrashing"), and a wrong judgment is
+negative value — it spends the tokens we exist to save and interrupts good work. Therefore the layer
+earns its place **only if the signal is accurate**, and accuracy is something we must validate before
+we ever let it intervene by default.
+
+This change adopts the work in a way that keeps that discipline: land the deterministic behavioral
+*observability* core (default **off**, zero overhead when off), and gate every *interventional* and
+heavy-infrastructure part behind opt-in modes and follow-up PRs that must prove their value.
+
+## What this is NOT (scope guardrails)
+
+- **No LLM inference.** The entire layer is deterministic runtime heuristics — Shannon entropy over
+  command signatures, oscillation over the module-transition sequence, hysteresis thresholds, wall-clock
+  decay. There are zero model calls. The north-star determinism constraint (`c6d1ad07`) holds.
+- **No new default surface.** `panicResponse.mode` defaults to `off`. When off: no scoring, no state
+  file, no injection, no telemetry, no background process. Existing users are unaffected.
+- **Not a pivot.** It extends the existing EpistemicLease nudge channel; it does not add a new domain,
+  a new tool to the default/minimal MCP surface, or a security/threat-modeling product.
+
+## What changes (the core that lands now)
+
+1. **Behavioral signals on `EpistemicTracker`.** `panicScore`, `panicLevel` (L0–L4 with hysteresis),
+   `localityConfidence` (shared with the freshness burst gate), and supporting fields. Computed by
+   `updatePanic()`, extracted from `updateTracker()` and called **conditionally** on panic mode.
+   `updateTracker()` (the freshness engine, now V4 on `main`) always runs unchanged.
+
+2. **`panic-response.ts` + `panic-constants.ts`.** The hysteresis engine, atomic `panic-state.json`
+   I/O (fail-open reads, POSIX rename writes), and a single source of truth for every threshold/weight.
+
+3. **Opt-in mode ladder, default `off`.** `off | observe | advisory`. `observe` = scoring + state file,
+   no agent impact (this is the mode we validate accuracy on). `advisory` = + a signal injected as a
+   separate content item at L2+ (never concatenated into the result body, so JSON/patches stay intact).
+
+4. **`openlore panic-check`** — the PreToolUse hook consumer. Reads state, applies cooldown,
+   **always exits 0** (fail-open). Not auto-installed; the user wires it up explicitly.
+
+5. **`openlore panic-level`** — read-only status-line output (`P:L{n}`), no writes, no side effects.
+
+6. **Telemetry.** A `panic` domain (`panic.jsonl`) with provenance-tagged `panic_score_delta` and
+   level-change events, and a panic section in `openlore telemetry`. Telemetry writes go through the
+   **existing `redactSecrets()` path** (mcp-security: Secret Confinement) — the rotation logic this PR
+   adds is combined with redaction, never replacing it.
+
+## What is deferred to follow-up PRs (must prove value before landing)
+
+These are the parts that carry real cost, external dependencies, or unproven intervention. They do
+**not** land in this change.
+
+| Deferred item | Why it waits |
+|---|---|
+| **`experimental_blocking` mode** (emits a block decision to the runtime) | Intervention-by-enforcement. We do not ship this until `observe`-mode telemetry shows the signal is accurate enough to act on. |
+| **Gryph integration** (`gryph-bridge.ts`, `gryph-watch.ts`, the daemon, PID files, the external `safedep/gryph` binary, CAS multi-writer writes) | New external dependency + a long-lived background process. Large maintenance surface for a second-order benefit. Re-evaluated on its own merits. |
+| **Auto-installed hooks** (`setup --hooks` wiring PreToolUse panic-check + UserPromptSubmit gryph-watch) | Default install footprint. Users opt in manually until the core is validated. |
+| **The observe → memory feedback loop** | The piece that most directly serves the north star: turning "agents reliably get lost in module X on this repo" into a durable memory/orient signal. Designed as its own change once observe-mode data exists. |
+
+## North-star alignment (how the core actually helps agents)
+
+- **Saves labor/tokens only if accurate.** The core ships `observe` (silent) so we can measure
+  false-positive rate against real sessions *before* any nudge reaches an agent. Intervention is gated
+  on that evidence.
+- **Feeds useful data — eventually as memory.** The strategic payoff is the deferred observe→memory
+  loop: behavioral observability becomes input to the memory layer (where `orient` should invest),
+  not just a real-time nag. This change lays the deterministic substrate that loop needs.
+- **Costs nothing when off.** Default `off` means existing users and the lean first-run surface are
+  untouched; the layer is pure opt-in.
+
+## Execution discipline
+
+- **Rebase, not merge-patch.** PR #83 is built on the V3.2 freshness engine and a since-rewritten
+  `mcp.ts` response path; it does not compile after a naive conflict resolution (it imports
+  `installClaudeHook`, a symbol `main` has since removed). This change integrates onto current `main`
+  and lands **green** (clean `tsc` + passing suite), reviewed, before merge.
+- **`record_decision` before the contract.** The `panicResponse.mode` config contract and the
+  `updatePanic()`/`updateTracker()` split are architectural; record them before/with the code.
+- **Preserve the contributor's work.** Nothing is thrown away. The deferred parts land later on their
+  own merits; the credit and the design are Laurent's.
+
+## Out of scope
+
+- Verifying that the panic *signal* is correct (that is the `observe`-mode validation follow-up, not
+  this integration).
+- Any change to the freshness/EpistemicLease semantics. `updateTracker()` is untouched.
+- Turning intervention on by default. The default is, and stays, `off` until proven.

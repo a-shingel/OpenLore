@@ -5,6 +5,12 @@
 // Project detection types
 export type ProjectType = 'nodejs' | 'python' | 'rust' | 'go' | 'java' | 'ruby' | 'php' | 'unknown';
 
+// Panic response impact level
+// off: panic subsystem disabled. Freshness/epistemic tracking always runs regardless. (default)
+// observe: panic scoring + state file, no intervention — observe the engine without acting
+// advisory / experimental_blocking: full pipeline with response injection / block signal
+export type PanicResponseMode = 'off' | 'observe' | 'advisory' | 'experimental_blocking';
+
 // Configuration types
 export interface OpenLoreConfig {
   version: string;
@@ -14,6 +20,21 @@ export interface OpenLoreConfig {
   generation: GenerationConfig;
   llm?: LLMConfig;
   embedding?: EmbeddingConfig;
+  panicResponse?: {
+    /**
+     * Controls the panic response subsystem. Default: 'off'.
+     *
+     * 'off' disables: panic scoring, panic state persistence, panic interventions,
+     *   panic telemetry, panic hook output.
+     *   Behavioral metrics required by the freshness engine (density, oscillation,
+     *   localityConfidence) continue to be computed in-memory as part of EpistemicLease.
+     * 'observe': panic scoring + state written, no intervention (collect only).
+     * 'advisory': full pipeline with L2+ response injection.
+     * 'experimental_blocking': advisory + runtime-mediated block signal at L4.
+     *   advisory:true is always present in the payload — runtime decides enforcement.
+     */
+    mode: PanicResponseMode;
+  };
   createdAt: string;
   lastRun: string | null;
   /**
