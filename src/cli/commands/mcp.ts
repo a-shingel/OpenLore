@@ -2031,7 +2031,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       content.push({ type: 'text', text });
       if (signal && !signal.prepend) content.push({ type: 'text', text: signal.text });
 
-      if (tracker && (panicPolicy === 'advisory' || panicPolicy === 'experimental_blocking')) {
+      if (tracker && panicPolicy === 'advisory') {
         const panicState = trackerToPanicState(tracker, agentName);
         const panicText = getPanicSignalText(panicState);
         if (panicText) {

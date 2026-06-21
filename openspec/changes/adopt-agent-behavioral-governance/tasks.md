@@ -5,35 +5,48 @@
 > `updatePanic()`/`updateTracker()` split (both architectural), per `CLAUDE.md`.
 
 ## 1. Integration onto current main (this PR — get to green)
-- [ ] Port net-new files: `panic-response.ts`, `panic-constants.ts`, `panic-check.ts`, `panic-level.ts`
+- [x] Port net-new files: `panic-response.ts`, `panic-constants.ts`, `panic-check.ts`, `panic-level.ts`
       and their tests.
-- [ ] Add behavioral fields to `EpistemicTracker`; extract `updatePanic()` from `updateTracker()` and
+- [x] Add behavioral fields to `EpistemicTracker`; extract `updatePanic()` from `updateTracker()` and
       export it. `updateTracker()` (V4 freshness, `repoMovedSinceOrient`) stays unchanged and always runs.
-- [ ] Resolve `mcp.ts`: panic injection rides the **current** response path (`rawText` → `capOutput`),
+- [x] Resolve `mcp.ts`: panic injection rides the **current** response path (`rawText` → `capOutput`),
       and `panic_level`/`panic_score` are added to main's richer `tool_call` emit (not a duplicate emit).
-- [ ] Resolve `telemetry.ts`: combine `redactSecrets()` (main, security) **with** rotation (PR). Redaction
-      must remain on every write.
-- [ ] Resolve `setup.ts`: fix the `installClaudeHook` import (main removed it); reconcile the `--global`
-      option (main) with `--panic` (PR). Do **not** auto-install hooks.
-- [ ] Resolve `index.ts` (union command registration), `config-manager.ts`, `types/index.ts`.
-- [ ] `panicResponse.mode` added to `OpenLoreConfig`; ladder = `off | observe | advisory`; default `off`.
-- [ ] Test: `tsc` clean; full suite green; panic test files pass against current main.
+- [x] Resolve `telemetry.ts`: combine `redactSecrets()` (main, security) **with** rotation (PR). Redaction
+      remains on every write.
+- [x] Resolve `setup.ts`: DEFERRED the whole `setup` wiring (`--panic` **and** `--hooks`) to the hooks
+      follow-up — setup.ts stays exactly as main (zero conflict / zero risk). This also sidesteps the
+      `installClaudeHook` break (we never import it). Users opt in via `panicResponse.mode` in config.
+- [x] Resolve `index.ts` (union command registration), `config-manager.ts`, `types/index.ts`.
+- [x] `panicResponse.mode` added to `OpenLoreConfig`; ladder = `off | observe | advisory`; default `off`.
+- [x] Reverted the PR's localityConfidence gate on **freshness** depth-escalation — `updateTracker()`
+      semantics now identical to pre-panic main (panic:off is a zero-behavior-change path).
+- [x] `tsc` clean; lint clean; full suite green (4240 passed, 2 skipped).
 
 ## 2. Safe defaults (this PR)
-- [ ] `mode: 'off'` default → zero panic overhead (no scoring, no state file, no injection, no telemetry).
-- [ ] `panic-check` and `panic-level` always exit 0 (fail-open) on every code path.
-- [ ] No hook auto-installed by `setup`; user opts in manually.
-- [ ] `updateTracker()` runs in all modes; only `updatePanic()` + `writePanicState()` are gated on mode.
+- [x] `mode: 'off'` default → zero panic overhead (`updatePanic()`/`writePanicState()` gated on
+      `panicPolicy !== 'off'`; injection only at `advisory`).
+- [x] `panic-check` and `panic-level` always exit 0 (fail-open) on every code path.
+- [x] No hook auto-installed by `setup` (setup wiring deferred).
+- [x] `updateTracker()` runs in all modes; only `updatePanic()` + `writePanicState()` are gated on mode.
 
 ## 3. Telemetry panic section (this PR)
-- [ ] `panic.jsonl` domain events with provenance (`panic_score_delta`, `panic_level_change`).
-- [ ] `openlore telemetry` panic summary (episodes, recovery latency, trigger frequency).
+- [x] `panic.jsonl` domain events with provenance (`panic_score_delta`, `panic_level_change`).
+- [x] `openlore telemetry` panic summary (episodes, recovery latency, trigger frequency).
 
 ## 4. Decisions + spec sync (this PR)
 - [ ] `record_decision`: adopt behavioral governance as an extension of the EpistemicLease nudge surface;
       core lands behind `mode:'off'`, intervention + Gryph + hooks deferred.
 - [ ] `record_decision`: `panicResponse.mode` config contract; `updatePanic()`/`updateTracker()` split.
-- [ ] Confirm no new tool enters the default/minimal MCP surface.
+- [x] No new tool enters the default/minimal MCP surface (panic-check/panic-level are CLI commands, not
+      MCP tools; no MCP tool added).
+
+## Scope trim applied (Gryph / blocking / hooks deferred)
+- [x] Removed `gryph-bridge.ts`, `gryph-watch.ts`, and their tests (external `safedep/gryph` binary +
+      background daemon + CAS multi-writer) — deferred to its own change.
+- [x] Removed `experimental_blocking` from the mode ladder (interventional enforcement) — deferred until
+      observe-mode accuracy is validated.
+- [x] Left inert plumbing in place for the deferred Gryph PR (`gryphWindowStart`, `revision`/CAS,
+      `GRYPH_*` constants) — dormant, no build/behavior impact.
 
 ## 5. Deferred — follow-up PRs (NOT this PR)
 - [ ] **Validate accuracy** on `observe`-mode telemetry: false-positive rate on real sessions. Gate all

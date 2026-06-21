@@ -8,8 +8,11 @@ export type ProjectType = 'nodejs' | 'python' | 'rust' | 'go' | 'java' | 'ruby' 
 // Panic response impact level
 // off: panic subsystem disabled. Freshness/epistemic tracking always runs regardless. (default)
 // observe: panic scoring + state file, no intervention — observe the engine without acting
-// advisory / experimental_blocking: full pipeline with response injection / block signal
-export type PanicResponseMode = 'off' | 'observe' | 'advisory' | 'experimental_blocking';
+// advisory: full pipeline with L2+ response injection
+// (Interventional enforcement — a runtime block signal — is deferred until the
+//  observe-mode signal accuracy is validated. See the adopt-agent-behavioral-
+//  governance proposal.)
+export type PanicResponseMode = 'off' | 'observe' | 'advisory';
 
 // Configuration types
 export interface OpenLoreConfig {
@@ -30,8 +33,6 @@ export interface OpenLoreConfig {
      *   localityConfidence) continue to be computed in-memory as part of EpistemicLease.
      * 'observe': panic scoring + state written, no intervention (collect only).
      * 'advisory': full pipeline with L2+ response injection.
-     * 'experimental_blocking': advisory + runtime-mediated block signal at L4.
-     *   advisory:true is always present in the payload — runtime decides enforcement.
      */
     mode: PanicResponseMode;
   };

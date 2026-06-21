@@ -11,7 +11,6 @@
 
 import { Command } from 'commander';
 import { readPanicState, writePanicState, buildPanicCheckOutput } from '../../core/services/mcp-handlers/panic-response.js';
-import { queryGryphSignals, applyGryphDelta } from '../../core/services/mcp-handlers/gryph-bridge.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { emit } from '../../core/services/telemetry.js';
 
@@ -35,27 +34,11 @@ export const panicCheckCommand = new Command('panic-check')
         process.exit(0);
       }
 
-      let state = readPanicState(dir);
+      const state = readPanicState(dir);
 
-      // Gryph enrichment — query from gryphWindowStart (2-min fallback avoids replaying hours of history)
-      const since = state.gryphWindowStart ?? new Date(Date.now() - 2 * 60 * 1000).toISOString();
-      const gryphSignals = queryGryphSignals(since);
-      if (gryphSignals) {
-        const enrichedTriggers = [...state.triggers];
-        const enrichedScore = applyGryphDelta(
-          state.panicScore,
-          gryphSignals,
-          state.panicLevel >= 2,  // isStale when at L2+
-          enrichedTriggers,
-        );
-        if (enrichedScore !== state.panicScore) {
-          state = {
-            ...state,
-            panicScore: enrichedScore,
-            triggers: enrichedTriggers,
-          };
-        }
-      }
+      // NOTE: Gryph runtime enrichment is deferred (see adopt-agent-behavioral-
+      // governance proposal). The panic-check hook consumes MCP-path panic state
+      // only; the Gryph background observer lands as a separate change.
 
       const output = buildPanicCheckOutput(state);
 
@@ -76,17 +59,7 @@ export const panicCheckCommand = new Command('panic-check')
           severity: output.severity,
           directive_mode: newCount >= 3,
           intervention_count: newCount,
-          gryph_enriched: gryphSignals !== null,
         });
-      }
-
-      // experimental_blocking: emit block signal at L4 — runtime decides enforcement.
-      // advisory:true is explicit in the payload: OpenLore recommends, never mandates.
-      // OpenLore always exits 0.
-      if (mode === 'experimental_blocking' && state.panicLevel >= 4) {
-        const blockOutput = { decision: 'block' as const, advisory: true, panicLevel: state.panicLevel, message: output.message };
-        process.stdout.write(JSON.stringify(blockOutput) + '\n');
-        process.exit(0);
       }
 
       process.stdout.write(formatOutput(output, format) + '\n');
