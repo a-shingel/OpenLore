@@ -34,11 +34,11 @@ or for local development:
 
 ### Recommended lean surface (cost, Spec 25 P1 · Spec 28)
 
-MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The full surface is **60 tools / ~58 KB / ~15k tokens** of `tools/list`. The Spec 14 benchmark showed this prefix is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)).
+MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The full surface is **61 tools / ~58 KB / ~15k tokens** of `tools/list`. The Spec 14 benchmark showed this prefix is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)).
 
 **Spec 28 measured how far the *server* can shrink that prefix, honestly:** MCP has no server-driven lazy-schema mechanism (`tools/list` always returns full schemas), and the lossless server-side byte-lever is only ~2% — the payload is dominated by irreducible per-tool schema structure plus the selection text an agent needs to pick a tool. So the real lever is the *client* (deferred schemas, below) and *tool count* (`--preset`), not byte-shaving. The surface has been trimmed losslessly anyway (shared param descriptions, no boilerplate) and is now **bounded by a regression guard** so it can't silently bloat. Two ways to get the lean surface, in order of preference:
 
-1. **Deferred schemas (best — keeps every tool available).** If your client supports it (Claude Code: `alwaysLoad: false`), advertise tool *names* cheaply and load a tool's schema only when it's used. See the [two-server setup](agent-setup.md) — you keep all 60 tools without paying their schema cost up front.
+1. **Deferred schemas (best — keeps every tool available).** If your client supports it (Claude Code: `alwaysLoad: false`), advertise tool *names* cheaply and load a tool's schema only when it's used. See the [two-server setup](agent-setup.md) — you keep all 61 tools without paying their schema cost up front.
 2. **`--preset navigation` (server-side, navigation-only).** Add `"args": ["mcp", "--preset", "navigation"]` for a 7-tool graph-traversal surface (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton). This is exactly the configuration the benchmark measured (−7%→−21% cost, −26% round-trips on deep traces). Note it omits the governance tools (`record_decision`, `check_architecture`, inventories), so prefer option 1 if you use the decision gate or architecture checks during a session.
 
 The tool list and schemas are emitted in a fixed, deterministic order with no per-request variation, so the provider KV-cache holds the surface and its cost drops sharply after the first call (guarded by a regression test).
@@ -207,8 +207,25 @@ Registered only under `openlore mcp --preset federation`. Federation is an index
 | Tool | Description | Requires prior analysis |
 |------|-------------|:---:|
 | `federation_status` | Report the federation registry and each registered repo's live index state (`indexed` / `stale` / `unindexed` / `missing`), with registered-vs-live fingerprints. Read-only. | No |
+| `spec_store_status` | Report the health of a spec-store binding (`.openlore/config.json` `specStore`): per-target resolution + live index state, reference presence, and store-path presence. Declared target/reference **names** resolve against the federation registry. Read-only; never throws, never blocks. | No |
 
 When a registry exists, `analyze_impact`, `find_dead_code`, `select_tests`, and `find_path` accept opt-in `federation` (boolean) and `federationRepos` (name list) params: cross-repo consumers, live-via-federation exports, cross-repo test selection, and cross-repo producer/bridge location respectively. Each response names `reposConsulted` / `reposSkipped` — unindexed/stale repos are reported, never guessed.
+
+A **spec-store binding** declares the code repositories an external spec repository targets/references; `spec_store_status` reports its health as a conclusion-shaped report whose `findings[]` carry stable codes (the `--json` agent contract):
+
+| Code | Severity | Meaning |
+|------|:---:|---------|
+| `no-binding` | info | no `specStore` block configured (single-repo behavior unchanged) |
+| `binding-invalid` | error | malformed block: empty name/path, self-referential store path, a duplicate name, or a name in both `targets` and `references` |
+| `registry-unreadable` | error | `.openlore/federation.json` is present but corrupt/unparseable |
+| `store-path-missing` | error | the store's declared `path` does not exist on disk |
+| `target-unresolved` | error | a declared target name is not registered in the federation registry |
+| `target-missing` | error | a resolved target's registered path no longer exists |
+| `index-missing` | warn | a resolved target has no built `.openlore` index |
+| `index-stale` | warn | a resolved target's index is stale vs its working tree |
+| `reference-missing` | warn | a declared reference is unresolved or its path is gone |
+
+The report is `sound` when it carries no error-severity finding. Every finding includes a pasteable `remediation`. Exposed only under `openlore mcp --preset federation`.
 
 **Story Management**
 
