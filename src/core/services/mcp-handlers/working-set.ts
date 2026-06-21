@@ -78,8 +78,12 @@ export interface WorkingSetItem {
 export interface AnchoredIntent {
   id: string;
   title: string;
+  /** The decision's status (e.g. 'verified', 'approved'). An 'approved' entry may be
+   *  surfaced for sync-awareness rather than strict scope — see briefTargetFromOrient. */
   status: string;
-  /** 'current' for a fresh anchor; 'drifted' when the anchor has moved (staleDecisions). */
+  /** 'current' = a fresh (or, without a graph view, not-yet-verifiable) anchor;
+   *  'drifted' = the anchor has moved and should be re-checked. Orphaned anchors are
+   *  never surfaced (withheld upstream by orient). */
   verdict: 'current' | 'drifted';
 }
 
@@ -134,11 +138,12 @@ export interface OrientView {
   callPaths?: Array<{ function: string; filePath: string; callers?: Array<{ name: string }> }>;
   specDomains?: Array<{ domain: string }>;
   insertionPoints?: Array<{ name: string; filePath: string; strategy: string }>;
-  // Orient's in-scope authoritative anchored decisions, each carrying a freshness
+  // Orient's task-relevant authoritative anchored decisions, each carrying a freshness
   // verdict. Orient EXCLUDES orphaned anchors from this set (they go to
   // `staleDecisions`, which we deliberately do not consume) and flags a moved anchor
-  // with `freshness: 'drifted'` / `verify: true`. This is the single source of
-  // anchored intent: it withholds orphaned by construction and flags drifted.
+  // with `freshness: 'drifted'` / `verify: true`. The single source of anchored intent:
+  // it withholds orphaned by construction and flags drifted. (Also includes any
+  // `approved`-status decisions orient surfaces for sync-awareness — see briefTargetFromOrient.)
   pendingDecisions?: Array<{ id: string; title: string; status?: string; freshness?: string; verify?: boolean }>;
 }
 
@@ -147,14 +152,20 @@ export interface OrientView {
  * plus its target brief (insertion points, spec domains, anchored intent). Pure —
  * the testable core of the per-target transformation, no I/O.
  *
- * Anchored intent comes from orient's `pendingDecisions` (the in-scope authoritative
- * set with per-decision freshness): a `drifted`/`verify` decision is flagged
- * `verdict: 'drifted'`, everything else is `current`. Orphaned anchors never reach
- * this set — orient withholds them — so the spec's "orphaned intent SHALL be
- * withheld" holds by construction. (We do NOT read orient's `governingDecisions` or
- * `staleDecisions`: the former is a file-level graph join that can include an
- * orphaned decision, and the latter IS the orphaned bucket — both would surface
- * orphaned intent the spec says to withhold.)
+ * Anchored intent comes from orient's `pendingDecisions` — the task-relevant
+ * authoritative decisions, each carrying a freshness verdict: a `drifted`/`verify`
+ * decision is flagged `verdict: 'drifted'`, everything else is `current`. Orphaned
+ * anchors never reach this set (orient routes them to `staleDecisions`), so the
+ * spec's "orphaned intent SHALL be withheld" holds by construction.
+ *
+ * This set is in-scope by file/domain match, plus any `approved`-status decisions
+ * orient always surfaces so the agent syncs them before committing — those carry
+ * `status: 'approved'`, distinguishing a sync nudge from a strictly in-scope synced
+ * decision. We do NOT intersect with orient's `governingDecisions`: that field is a
+ * graph-projection join built at analyze time and is empty/stale for decisions
+ * recorded since the last analyze, so intersecting would drop genuinely in-scope
+ * intent (verified by dogfood — governingDecisions was empty while pendingDecisions
+ * correctly carried the in-scope decisions).
  */
 export function briefTargetFromOrient(
   targetName: string,
@@ -200,12 +211,17 @@ export function briefTargetFromOrient(
 
 /**
  * Rank merged items by structural relevance and bound them to a token budget.
- * Pure + deterministic: sort is stable on (score desc, target, name) so truncation
- * is reproducible. Returns the kept items and how many were dropped.
+ * Pure + deterministic: sort is total-ordered on (score desc, target, name,
+ * filePath) so the truncation boundary is reproducible even for two same-named
+ * symbols in different files of one target (no reliance on Array.sort stability).
+ * Returns the kept items and how many were dropped.
  */
 export function rankAndBudget(items: WorkingSetItem[], budget: number): { kept: WorkingSetItem[]; omitted: number } {
   const sorted = [...items].sort((a, b) =>
-    b.score - a.score || a.target.localeCompare(b.target) || a.name.localeCompare(b.name));
+    b.score - a.score ||
+    a.target.localeCompare(b.target) ||
+    a.name.localeCompare(b.name) ||
+    a.filePath.localeCompare(b.filePath));
   return applyTokenBudget(sorted, budget);
 }
 
@@ -363,23 +379,25 @@ export async function handleWorkingSetContext(
     };
   }
 
-  // Resolve the change against the store's working tree.
+  // Resolve the change against the store's working tree. Use the trimmed id
+  // consistently on every surface (subject, message, echoed change.id).
+  const id = changeId.trim();
   const storeDir = canonical(store.path, absDir);
-  const change = await readChange(storeDir, changeId.trim());
+  const change = await readChange(storeDir, id);
   if (!change) {
     findings.push({
-      code: 'change-not-found', severity: 'error', subject: changeId,
-      message: `No proposal found for change "${changeId}" under the spec store.`,
-      remediation: `Expected ${join(storeDir, 'openspec', 'changes', changeId, 'proposal.md')}; check the change id and the store path.`,
+      code: 'change-not-found', severity: 'error', subject: id,
+      message: `No proposal found for change "${id}" under the spec store.`,
+      remediation: `Expected ${join(storeDir, 'openspec', 'changes', id, 'proposal.md')}; check the change id and the store path.`,
     });
     return {
-      bound: true, store, change: { id: changeId, intent: '' },
+      bound: true, store, change: { id, intent: '' },
       targets: [], items: [], findings, ready: false,
-      summary: `Change "${changeId}" not found under spec store "${store.name}".`,
+      summary: `Change "${id}" not found under spec store "${store.name}".`,
     };
   }
 
-  const intent = extractIntent(change.proposal, changeId.trim());
+  const intent = extractIntent(change.proposal, id);
 
   // Briefable = resolved AND indexed. Everything else is reported but skipped.
   const briefable = status.targets.filter(t => t.resolved && t.state === 'indexed' && t.path);
@@ -446,17 +464,17 @@ export async function handleWorkingSetContext(
   const ready = status.sound && briefedCount > 0;
   const errors = findings.filter(f => f.severity === 'error').length;
   const summary = briefedCount > 0
-    ? `Working set for change "${changeId}" on store "${store.name}": ` +
+    ? `Working set for change "${id}" on store "${store.name}": ` +
       `${kept.length} item(s) across ${briefedCount}/${status.targets.length} target(s)` +
       (omitted > 0 ? `, ${omitted} omitted to fit budget` : '') + '.'
-    : `Working set for change "${changeId}" on store "${store.name}": no briefable targets` +
+    : `Working set for change "${id}" on store "${store.name}": no briefable targets` +
       (errors ? `, ${errors} blocking issue(s)` : '') + '.';
 
   return {
     bound: true,
     store,
     change: {
-      id: changeId.trim(),
+      id,
       intent,
       ...(change.declaredScope.length ? { declaredScope: change.declaredScope } : {}),
     },

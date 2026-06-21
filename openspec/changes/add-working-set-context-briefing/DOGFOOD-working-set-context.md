@@ -149,10 +149,46 @@ defect** plus new edge cases — all fixed and re-verified:
   full briefing = 5 items; `tokenBudget:200` = 1 item + `omissionNote`; the change id reaches the handler.
   An MCP client can fully drive the tool, not just the CLI.
 
+## Round 3 — determinism, genuine multi-target, and a calibrated non-fix
+
+A third pass got fresh eyes on the thrice-revised handler and validated properties the earlier rounds
+asserted but never exercised against real data:
+
+- **Genuine two-distinct-real-index merge (new).** Copying the OpenLore index to a second path and
+  registering both as targets produced ONE briefing across both — `10 item(s) across 2/2 target(s)`, 5
+  per target, every item attributed to its target, the same symbol (`handleWorkingSetContext`) correctly
+  appearing under BOTH `openlore` and `repo2`. The cross-target merge/attribution was previously only
+  unit-tested with synthetic inputs; this confirms it on real indexes.
+- **Determinism (new).** Two identical `--json` runs are **byte-identical** (`diff` → no change). The
+  rank tie-break was tightened to a total order `(score desc, target, name, filePath)` so two same-named
+  symbols in one target can't reorder across engine sort-stability differences.
+- **No mutation (new).** Store and target file mtimes are unchanged after a briefing — the "reads, never
+  writes" promise holds on disk.
+
+A spec-compliance reviewer flagged that orient's `pendingDecisions` (our anchored-intent source) also
+carries `approved`-status decisions surfaced for sync-awareness, so a per-target briefing could include
+an out-of-scope approved decision — versus the spec's "in-scope" wording. **Investigated and deliberately
+not "fixed" by the suggested intersection.** Ground truth from a direct orient probe on this repo:
+
+```
+pendingDecisions:    [b65df761 (verified, fresh), c7a5bd81 (verified, fresh)]   # genuinely in-scope by file
+governingDecisions:  []                                                          # graph-projection, stale/empty
+```
+
+`governingDecisions` is a graph join built at analyze time, so it is empty for decisions recorded since
+the last analyze — intersecting `pendingDecisions ∩ governingDecisions` (the proposed fix) would have
+**dropped the real in-scope intent**, which is worse. The approved-out-of-scope case is also not
+observable here (no lingering `approved` decisions — they are `verified`/synced), and each entry's
+`status` field already distinguishes an approved sync-nudge from a strictly-in-scope verified decision.
+So the code keeps `pendingDecisions`; instead the wording (handler doc, `AnchoredIntent.status`/`verdict`
+docs) was made precise about the "in-scope plus approved-pending-sync" reality. Two genuinely-clean nits
+found alongside were fixed: the `filePath` tie-break above, and using the trimmed change id consistently
+on the `change-not-found` surface.
+
 ## Verdict
 
-✅ End-to-end working against a real index, spec-compliant, and hardened against hostile change ids and
-proposals. The
+✅ End-to-end working against a real index (including a genuine two-target merge), deterministic
+(byte-identical, no mutation), spec-compliant, and hardened against hostile change ids and proposals. The
 briefing is deterministic, conclusion-shaped, per-target-attributed, token-budgeted with an honest
 omission note, and folds in fresh anchored intent (orphaned withheld, drifted flagged). No LLM enters the
 path — the north star (`c6d1ad07`) holds.

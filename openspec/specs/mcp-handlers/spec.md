@@ -832,7 +832,8 @@ The working-set briefing SHALL be bounded by the trust-calibrated context budget
 relevance to the change's scope, and SHALL emit an explicit omission note when truncated rather than
 silently dropping items. Every item SHALL be attributed to its target repository. In-scope anchored
 intent SHALL be included with its freshness verdict; orphaned intent SHALL be withheld and drifted intent
-SHALL be flagged.
+SHALL be flagged. Approved decisions awaiting sync MAY additionally be surfaced for sync-awareness,
+distinguishable by their status.
 
 #### Scenario: An over-budget working set is truncated transparently
 

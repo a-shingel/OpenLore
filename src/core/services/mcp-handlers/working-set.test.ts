@@ -207,6 +207,21 @@ describe('rankAndBudget', () => {
     expect(rankAndBudget(tie, 100_000).kept.map(i => `${i.target}/${i.name}`))
       .toEqual(['a/a', 'a/z', 'b/q']);
   });
+
+  // Total order: two same-named symbols in one target, differing only by file, must
+  // sort by filePath — so a tight budget's truncation boundary is reproducible
+  // regardless of input order / engine sort stability.
+  it('breaks score+target+name ties on filePath', () => {
+    const fwd: WorkingSetItem[] = [
+      { target: 'api', name: 'init', filePath: 'b.ts', score: 5, expand: 'e', callers: [], specDomains: [] },
+      { target: 'api', name: 'init', filePath: 'a.ts', score: 5, expand: 'e', callers: [], specDomains: [] },
+    ];
+    const rev = [...fwd].reverse();
+    expect(rankAndBudget(fwd, 100_000).kept.map(i => i.filePath)).toEqual(['a.ts', 'b.ts']);
+    // Same result whichever order they arrive in, and a 1-item budget keeps a.ts.
+    expect(rankAndBudget(rev, 100_000).kept.map(i => i.filePath)).toEqual(['a.ts', 'b.ts']);
+    expect(rankAndBudget(rev, 1).kept[0].filePath).toBe('a.ts');
+  });
 });
 
 // ── Handler over a spec-store binding (no real index required) ────────────────
