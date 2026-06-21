@@ -90,11 +90,40 @@ findings: binding-unsound (warn), target-not-briefable (warn)
 The handler briefs whatever targets ARE briefable and reports the rest as findings — it never throws and
 never blocks.
 
+## Adversarial round (hostile inputs, real CLI)
+
+A second pass drove deliberately hostile inputs through the real CLI against a live index, and probed
+the pure helpers. It found and fixed **one critical security bug** plus two correctness bugs:
+
+- **CRITICAL — change-id path traversal (fixed).** `change = "../../../secret"` escaped the store
+  (`<store>/openspec/changes/<id>` → `<scratch>/secret`) and read an **out-of-store** `proposal.md`,
+  leaking its contents into `report.change.intent`. Fixed by confining `changeId` with `safeJoin`
+  (symlink-aware) inside `readChange`; an escape degrades to `change-not-found` (the no-throw contract
+  holds). Verified after the fix:
+  ```
+  $ openlore working-set context --change "../../../secret" --json
+  codes: ['change-not-found']   intent: ''   LEAK? False        # control "real-change": ready=True, 5 items
+  $ openlore working-set context --change "/etc" --json
+  codes: ['change-not-found']   leak: False                     # absolute paths rejected too
+  ```
+- **CRLF body loss (fixed).** A Windows-authored proposal (`\r\n`) lost its entire `## Why` body — the
+  target got oriented on the bare title. `extractIntent` now normalizes line endings first.
+- **Empty-section heading leak (fixed).** An empty `## Why` spilled the next heading (`## What changes`)
+  into the orientation query. `extractIntent` now skips `#`-led paragraphs.
+- **Lone-surrogate truncation (hardened).** The 950-char slice could leave a dangling high surrogate on
+  an emoji-dense proposal; now trimmed. (Length was already ≤ MAX_QUERY_LENGTH, so orient never rejected.)
+
+Other hostile inputs already degraded cleanly and were re-confirmed: `--token-budget abc` (NaN) →
+default 8000; change ids with spaces / nonexistent → `change-not-found`; every attack still **exits 0**.
+Each fix is now pinned by a test in `working-set.test.ts` (traversal-leak, CRLF, heading-leak,
+surrogate) — the suite had no coverage for these before.
+
 ## Verdict
 
-✅ End-to-end working against a real index. The briefing is deterministic, conclusion-shaped,
-per-target-attributed, token-budgeted with an honest omission note, and folds in fresh anchored intent
-(orphaned withheld, drifted flagged). No LLM enters the path — the north star (`c6d1ad07`) holds.
+✅ End-to-end working against a real index, and hardened against hostile change ids and proposals. The
+briefing is deterministic, conclusion-shaped, per-target-attributed, token-budgeted with an honest
+omission note, and folds in fresh anchored intent (orphaned withheld, drifted flagged). No LLM enters the
+path — the north star (`c6d1ad07`) holds.
 
 > Multi-target merge across **distinct** indexed repos is covered deterministically by the pure-helper
 > unit tests (`briefTargetFromOrient` + `rankAndBudget` over two synthetic targets); registering two

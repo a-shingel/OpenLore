@@ -250,9 +250,32 @@ lean         boolean  Optional: return only the navigation core (relevantFunctio
                       specDomains + suggestedTools), dropping enrichment (Spec 27). See below.
 ```
 
-Response includes `suggestedTools: string[]` — a ranked list of openlore tool names relevant to the task, derived from hub presence, spec domains, and task keywords. No extra I/O. Use this on clients without Tool Search (Cline, Cursor, OpenCode) to know which tools to call next without enumerating all 60.
+Response includes `suggestedTools: string[]` — a ranked list of openlore tool names relevant to the task, derived from hub presence, spec domains, and task keywords. No extra I/O. Use this on clients without Tool Search (Cline, Cursor, OpenCode) to know which tools to call next without enumerating all 62.
 
 **Lean mode (Spec 27).** `lean: true` (CLI: `orient --lean`) returns only the navigation core for shallow "who calls X / where is Y" lookups — ~40% smaller than the rich default on this repo. Everything dropped (insertion points, provenance, change-coupling, inline specs, matching specs, decisions, architecture violations) is one `expand` handle or one dedicated tool call away, so it trims bytes per turn without forcing a follow-up round-trip. Lean is also **compute-lean** (Spec 27 P5): it skips the work behind those blocks — the extra spec-embedding search, manifest/spec-file reads, the decision-store load, and the git-derived joins — so the shallow path is faster, not only smaller. The rich default is unchanged; omit `lean` when you need specs, decisions, or insertion points.
+
+**`working_set_context`**
+```
+directory    string   Absolute path to the home project directory (holds the specStore binding)
+change       string   The change id to brief; its proposal.md lives under the bound store at
+                      <store>/openspec/changes/<change>/. Confined to the store (traversal is rejected).
+tokenBudget  number   Optional: cap the merged briefing to ~this many tokens (default: 8000)
+```
+
+Response (`WorkingSetContextReport`) — the stable JSON shape an orchestrator can rely on:
+```
+bound        boolean   whether a specStore binding is configured
+store        { name, path }                       present when bound
+change       { id, intent, declaredScope? }        intent = the ≤1000-char task oriented on; declaredScope = the change's spec-delta domains
+targets      [ { target, briefed, reason?, insertionPoints[], specDomains[],
+                 anchoredIntent[ { id, title, status, verdict: "current"|"drifted" } ] } ]
+items        [ { target, name, filePath, score, expand, signature?, callers[], specDomains[] } ]   merged, ranked, budgeted
+omissionNote string    present only when the budget dropped items
+findings     [ { code, severity, subject, message, remediation } ]   stable codes (see below)
+ready        boolean   true when the binding is sound AND ≥1 target was briefed
+summary      string    conclusion-shaped headline
+```
+Finding codes: `no-binding`, `binding-unsound`, `change-unspecified`, `change-not-found`, `no-briefable-targets`, `target-not-briefable`, `orient-unavailable`. Read-only; always succeeds (every problem is a finding), never blocks.
 
 **`analyze_codebase`**
 ```

@@ -98,6 +98,27 @@ describe('extractIntent', () => {
     const intent = extractIntent(long, 'c');
     expect(intent.length).toBeLessThanOrEqual(950);
   });
+
+  // Adversarial: CRLF (Windows-authored) proposals must not lose the Why body.
+  it('preserves the Why body under CRLF line endings', () => {
+    const intent = extractIntent('# Title\r\n\r\n## Why\r\n\r\nReason here.\r\n', 'c');
+    expect(intent).toBe('Title. Reason here.');
+  });
+
+  // Adversarial: an empty Why section must not spill the next heading into the query.
+  it('does not leak the next heading when the Why section is empty', () => {
+    const intent = extractIntent('# Title\n\n## Why\n\n## What changes\n\nfoo bar', 'c');
+    expect(intent).not.toContain('#');
+    expect(intent).toBe('Title. foo bar');
+  });
+
+  // Adversarial: truncation must never end on a dangling lone surrogate, and never
+  // exceed MAX_QUERY_LENGTH (1000) even for an emoji-dense proposal.
+  it('truncates an emoji-dense proposal without leaving a lone surrogate', () => {
+    const intent = extractIntent('# T\n\n## Why\n\n' + '😀'.repeat(600), 'c');
+    expect(intent.length).toBeLessThanOrEqual(1000);
+    expect(/[\uD800-\uDBFF]$/.test(intent)).toBe(false);
+  });
 });
 
 // ── Pure: per-target projection ──────────────────────────────────────────────
@@ -207,6 +228,27 @@ describe('handleWorkingSetContext', () => {
 
     const report = await handleWorkingSetContext(home, 'no-such-change');
     expect(report.findings.some(f => f.code === 'change-not-found')).toBe(true);
+    expect(report.ready).toBe(false);
+    expect(() => assertConclusionShape('working_set_context', report)).not.toThrow();
+  });
+
+  // SECURITY: a path-traversal change id must NOT read a proposal outside the store.
+  // It degrades to change-not-found (the change does not resolve under the store),
+  // never leaking out-of-store file contents into the briefing.
+  it('refuses a path-traversal change id and leaks nothing outside the store', async () => {
+    const api = makeRepo('api', 'h');
+    addRepo(home, api, { name: 'api' });
+    const store = makeRepo('plans', null);
+    writeBinding({ name: 'plans', path: store, targets: ['api'] });
+    // Plant a proposal OUTSIDE the store that traversal would otherwise reach:
+    // <scratch>/secret/proposal.md, reachable from <store>/openspec/changes via ../../../secret
+    mkdirSync(join(scratch, 'secret'), { recursive: true });
+    writeFileSync(join(scratch, 'secret', 'proposal.md'), '# SECRET\n\n## Why\n\nOut-of-store content.');
+
+    const report = await handleWorkingSetContext(home, '../../../secret');
+    expect(report.findings.some(f => f.code === 'change-not-found')).toBe(true);
+    expect(report.change?.intent ?? '').not.toContain('Out-of-store');
+    expect(report.change?.intent ?? '').not.toContain('SECRET');
     expect(report.ready).toBe(false);
     expect(() => assertConclusionShape('working_set_context', report)).not.toThrow();
   });

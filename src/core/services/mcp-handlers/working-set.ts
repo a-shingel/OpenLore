@@ -27,7 +27,7 @@
 import { existsSync, realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
-import { validateDirectory } from './utils.js';
+import { validateDirectory, safeJoin } from './utils.js';
 import { handleSpecStoreStatus, type SpecStoreStatusReport } from './spec-store.js';
 import { handleOrient } from './orient.js';
 import { applyTokenBudget, omissionNote } from './progressive.js';
@@ -216,25 +216,33 @@ function canonical(p: string, base: string): string {
  * when present, else the proposal's opening prose. Deterministic; no LLM.
  */
 export function extractIntent(proposalText: string, changeId: string): string {
-  const titleMatch = proposalText.match(/^#\s+(.+)$/m);
+  // Normalize CRLF/CR up front: every match/split below is `\n`-only, so a
+  // Windows-authored proposal would otherwise lose its entire Why body.
+  const text = proposalText.replace(/\r\n?/g, '\n');
+  const titleMatch = text.match(/^#\s+(.+)$/m);
   const title = titleMatch ? titleMatch[1].trim() : changeId;
 
-  // The first paragraph of "## Why" (or "## What changes") is the densest signal.
+  // The first NON-HEADING paragraph of "## Why" (or "## What changes") is the
+  // densest signal. Skipping `#`-led candidates stops an empty section from
+  // spilling the next heading line (e.g. "## What changes") into the query.
+  const isProse = (s: string): boolean => Boolean(s) && !s.startsWith('#') && !s.startsWith('>');
   let body = '';
-  const sectionMatch = proposalText.match(/^##\s+(?:Why|What changes)\b[^\n]*\n+([\s\S]*?)(?:\n##\s|$)/m);
+  const sectionMatch = text.match(/^##\s+(?:Why|What changes)\b[^\n]*\n+([\s\S]*?)(?:\n##\s|$)/m);
   if (sectionMatch) {
-    body = sectionMatch[1].split(/\n\s*\n/).map(s => s.trim()).find(Boolean) ?? '';
-  } else {
-    // No recognizable section — take the first non-heading, non-blockquote paragraph.
-    body = proposalText
-      .split(/\n\s*\n/)
-      .map(s => s.trim())
-      .find(s => s && !s.startsWith('#') && !s.startsWith('>')) ?? '';
+    body = sectionMatch[1].split(/\n\s*\n/).map(s => s.trim()).find(isProse) ?? '';
+  }
+  if (!body) {
+    // No recognizable (or no prose) section — take the first prose paragraph.
+    body = text.split(/\n\s*\n/).map(s => s.trim()).find(isProse) ?? '';
   }
   // Collapse whitespace; markdown markup is harmless to BM25/embedding but noisy.
   const collapsed = `${title}. ${body}`.replace(/\s+/g, ' ').trim();
   // MAX_QUERY_LENGTH is 1000; stay clear of it so orient never rejects the task.
-  return collapsed.length > 950 ? collapsed.slice(0, 950).trimEnd() : collapsed;
+  if (collapsed.length <= 950) return collapsed;
+  let sliced = collapsed.slice(0, 950).trimEnd();
+  // Don't end on a lone high surrogate left dangling by the slice.
+  if (/[\uD800-\uDBFF]$/.test(sliced)) sliced = sliced.slice(0, -1);
+  return sliced;
 }
 
 /** Find the change directory under a store path; returns its proposal text + declared scope. */
@@ -242,7 +250,17 @@ async function readChange(
   storeDir: string,
   changeId: string,
 ): Promise<{ proposal: string; declaredScope: string[] } | null> {
-  const changeDir = join(storeDir, 'openspec', 'changes', changeId);
+  // SECURITY: `changeId` is orchestrator/agent input. Without confinement, a value
+  // like "../../../secret" escapes the store and turns this read into an arbitrary
+  // `proposal.md` disclosure primitive. `safeJoin` confines (symlink-aware) to the
+  // store and THROWS on escape; the handler contract is no-throw, so an escape is
+  // caught and degraded to "no such change under the store" (change-not-found).
+  let changeDir: string;
+  try {
+    changeDir = safeJoin(storeDir, join('openspec', 'changes', changeId));
+  } catch {
+    return null;
+  }
   const proposalPath = join(changeDir, 'proposal.md');
   if (!existsSync(proposalPath)) return null;
   let proposal: string;
