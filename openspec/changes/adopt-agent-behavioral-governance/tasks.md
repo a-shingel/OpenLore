@@ -83,3 +83,34 @@
       Only then may a maintainer enable an interventional posture by default — a human decision.
 - [ ] **(Optional follow-up) Dwell-aware oscillation.** The calibration documents a fix candidate for
       the over-sensitivity; the calibration harness now exists to validate any such change safely.
+
+## 8. Adversarial hardening (deep multi-agent red-team rounds)
+
+Findings from manual + parallel-agent adversarial testing, all fixed + regression-tested in #175:
+
+- [x] **mode:'off' telemetry leak** — resetTracker() emitted panic_orient_reset on the always-run
+      freshness path; extracted resetPanicOnOrient(), gated on mode.
+- [x] **Cross-writer revision regression** — fresh MCP session clobbered the hook's revision; seed
+      from max(tracker, disk).
+- [x] **orient garbage hotspot** — readHotspotArtifact now shape-validates each entry; **panic-replay**
+      malformed-filePath crash sanitized.
+- [x] **Decay starvation (high)** — per-call floor + baseline reset discarded the sub-12s remainder, so
+      active agents never decayed (pinned at CRITICAL). Now remainder-preserving — decay accrues by
+      wall-clock regardless of call cadence.
+- [x] **Fail-open exit codes** — panic-check/panic-level exited 1 on commander parse errors (before the
+      action try/catch); allowUnknownOption + exitOverride(→0).
+- [x] **Cross-process state races (high)** — panic-check increment lost updates + casWritePanicState
+      read→rename window let concurrent CAS writes clobber. Real O_CREAT|O_EXCL cross-process lock
+      (recordHookInterventionLocked + locked CAS) + unique temp names. Verified: 40 concurrent → 40
+      increments; 1187 CAS successes → revision 1187.
+- [x] **Gryph orphan processes (high)** — forking-gryph grandchildren orphaned on each daemon timeout;
+      async path now spawns detached + SIGKILLs the group.
+- [x] **Gryph env NaN crash (med-high)** — non-numeric OPENLORE_GRYPH_POLL_INTERVAL_MS crashed
+      gryph-watch + left a stale PID; NaN-safe coercion + startup try/catch cleanup.
+- [x] **setup clobbered corrupt settings.json** — now refuses to overwrite an existing unparseable file.
+
+Verified ROBUST under adversarial load (no change needed): mode:'off' zero panic behavior end-to-end;
+secret confinement (no API keys/tokens leak to telemetry/state); MCP tool surface unchanged (60);
+freshness signal unchanged by panic mode; atomic state-file rename (never corrupt); daemon
+SIGTERM/SIGINT/stdin-EOF lifecycle + PID singleton; score bounds [0,100]; hysteresis/ceiling/refractory
+boundaries; determinism; ~50k-step replay performance.
