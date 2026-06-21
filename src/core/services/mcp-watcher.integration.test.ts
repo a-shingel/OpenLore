@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtemp, writeFile, readFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LLMContext } from '../analyzer/artifact-generator.js';
@@ -127,6 +127,217 @@ describe('McpWatcher — real fs watcher', () => {
     // No duplicate entries for the same file
     expect(after2.signatures?.filter(s => s.path === 'service.ts')).toHaveLength(1);
   }, 15_000);
+
+  it('keeps dependency-graph.json import edges live when an import changes', async () => {
+    const { rootPath, outputPath } = await setupProject();
+
+    // a.ts imports ./b initially; b.ts and c.ts are resolvable targets.
+    const aFile = join(rootPath, 'a.ts');
+    const absA = aFile, absB = join(rootPath, 'b.ts'), absC = join(rootPath, 'c.ts');
+    await writeFile(aFile, "import { x } from './b';\nexport const y = x;\n", 'utf-8');
+    await writeFile(absB, 'export const x = 1;\n', 'utf-8');
+    await writeFile(absC, 'export const x = 2;\n', 'utf-8');
+
+    // Seed dependency-graph.json with the a → b edge (as a full analyze would).
+    const graphPath = join(outputPath, 'dependency-graph.json');
+    await writeFile(graphPath, JSON.stringify({
+      nodes: [
+        { id: absA, metrics: { inDegree: 0, outDegree: 1 } },
+        { id: absB, metrics: { inDegree: 1, outDegree: 0 } },
+        { id: absC, metrics: { inDegree: 0, outDegree: 0 } },
+      ],
+      edges: [{ source: absA, target: absB, importedNames: ['x'], isTypeOnly: false, weight: 1 }],
+    }), 'utf-8');
+
+    const watcher = new McpWatcher({ rootPath, outputPath, debounceMs: DEBOUNCE_MS });
+    watchers.push(watcher);
+    await watcher.start();
+
+    // Re-point the import from ./b to ./c.
+    await writeFile(aFile, "import { x } from './c';\nexport const y = x;\n", 'utf-8');
+    await wait(WAIT_MS);
+
+    const g = JSON.parse(await readFile(graphPath, 'utf-8')) as {
+      nodes: Array<{ id: string; metrics: { inDegree: number; outDegree: number } }>;
+      edges: Array<{ source: string; target: string }>;
+    };
+    // Old edge gone, new edge present.
+    expect(g.edges.some(e => e.source === absA && e.target === absB)).toBe(false);
+    expect(g.edges.some(e => e.source === absA && e.target === absC)).toBe(true);
+    // Degrees recomputed: c now consumed, b no longer.
+    expect(g.nodes.find(n => n.id === absC)!.metrics.inDegree).toBe(1);
+    expect(g.nodes.find(n => n.id === absB)!.metrics.inDegree).toBe(0);
+    expect(g.nodes.find(n => n.id === absA)!.metrics.outDegree).toBe(1);
+  }, 15_000);
+
+  it('preserves call-synthesized edges and drops all import edges when imports are removed', async () => {
+    const { rootPath, outputPath } = await setupProject();
+    const aFile = join(rootPath, 'a.ts');
+    const absA = aFile, absB = join(rootPath, 'b.ts');
+    await writeFile(aFile, "import { x } from './b';\nexport const y = x;\n", 'utf-8');
+    await writeFile(absB, 'export const x = 1;\n', 'utf-8');
+
+    const graphPath = join(outputPath, 'dependency-graph.json');
+    await writeFile(graphPath, JSON.stringify({
+      nodes: [
+        { id: absA, metrics: { inDegree: 0, outDegree: 1 } },
+        { id: absB, metrics: { inDegree: 1, outDegree: 0 } },
+      ],
+      edges: [
+        { source: absA, target: absB, importedNames: ['x'], isTypeOnly: false, weight: 1 },
+        // A call-synthesized edge from the same source — must survive the patch.
+        { source: absA, target: absB, importedNames: [], isTypeOnly: false, weight: 1, isCallEdge: true },
+      ],
+    }), 'utf-8');
+
+    const watcher = new McpWatcher({ rootPath, outputPath, debounceMs: DEBOUNCE_MS });
+    watchers.push(watcher);
+    await watcher.start();
+
+    // Remove the import entirely.
+    await writeFile(aFile, 'export const y = 42;\n', 'utf-8');
+    await wait(WAIT_MS);
+
+    const g = JSON.parse(await readFile(graphPath, 'utf-8')) as {
+      nodes: Array<{ id: string; metrics: { outDegree: number } }>;
+      edges: Array<{ source: string; target: string; isCallEdge?: boolean }>;
+    };
+    // The import edge is gone…
+    expect(g.edges.some(e => e.source === absA && e.target === absB && !e.isCallEdge)).toBe(false);
+    // …but the call-synthesized edge survives (watcher doesn't rebuild those).
+    expect(g.edges.some(e => e.source === absA && e.isCallEdge === true)).toBe(true);
+  }, 15_000);
+
+  it('keeps HTML asset edges live when an inline <script src> changes', async () => {
+    const { rootPath, outputPath } = await setupProject();
+    const htmlFile = join(rootPath, 'index.html');
+    const absHtml = htmlFile, absOld = join(rootPath, 'old.js'), absApp = join(rootPath, 'app.js');
+    await writeFile(htmlFile, '<html><body><script src="old.js"></script></body></html>\n', 'utf-8');
+    await writeFile(absOld, 'console.log(1);\n', 'utf-8');
+    await writeFile(absApp, 'console.log(2);\n', 'utf-8');
+
+    const graphPath = join(outputPath, 'dependency-graph.json');
+    await writeFile(graphPath, JSON.stringify({
+      nodes: [
+        { id: absHtml, metrics: { inDegree: 0, outDegree: 1 } },
+        { id: absOld, metrics: { inDegree: 1, outDegree: 0 } },
+        { id: absApp, metrics: { inDegree: 0, outDegree: 0 } },
+      ],
+      edges: [{ source: absHtml, target: absOld, importedNames: [], isTypeOnly: false, weight: 1, assetKind: 'script' }],
+    }), 'utf-8');
+
+    const watcher = new McpWatcher({ rootPath, outputPath, debounceMs: DEBOUNCE_MS });
+    watchers.push(watcher);
+    await watcher.start();
+
+    // Re-point the script from old.js to app.js.
+    await writeFile(htmlFile, '<html><body><script src="app.js"></script></body></html>\n', 'utf-8');
+    await wait(WAIT_MS);
+
+    const g = JSON.parse(await readFile(graphPath, 'utf-8')) as {
+      edges: Array<{ source: string; target: string; assetKind?: string }>;
+    };
+    expect(g.edges.some(e => e.source === absHtml && e.target === absOld)).toBe(false);
+    const appEdge = g.edges.find(e => e.source === absHtml && e.target === absApp);
+    expect(appEdge, 'index.html → app.js asset edge').toBeDefined();
+    expect(appEdge!.assetKind).toBe('script');
+  }, 15_000);
+
+  it('adds a node for a file not yet in the graph (new file / first edit after analyze)', async () => {
+    const { rootPath, outputPath } = await setupProject();
+    const aFile = join(rootPath, 'a.ts');
+    const absA = aFile, absOther = join(rootPath, 'other.ts');
+    await writeFile(aFile, "import { z } from './other';\nexport const y = z;\n", 'utf-8');
+    await writeFile(absOther, 'export const z = 1;\n', 'utf-8');
+
+    const graphPath = join(outputPath, 'dependency-graph.json');
+    // a.ts is NOT yet a node; other.ts is.
+    await writeFile(graphPath, JSON.stringify({
+      nodes: [{ id: absOther, file: { path: 'other.ts', absolutePath: absOther }, metrics: { inDegree: 0, outDegree: 0 } }],
+      edges: [],
+    }), 'utf-8');
+
+    const watcher = new McpWatcher({ rootPath, outputPath, debounceMs: DEBOUNCE_MS });
+    watchers.push(watcher);
+    await watcher.start();
+    await writeFile(aFile, "import { z } from './other';\nexport const y = z + 1;\n", 'utf-8');
+    await wait(WAIT_MS);
+
+    const g = JSON.parse(await readFile(graphPath, 'utf-8')) as {
+      nodes: Array<{ id: string }>;
+      edges: Array<{ source: string; target: string }>;
+    };
+    // a.ts is now a node, with its outgoing edge to other.ts.
+    expect(g.nodes.some(n => n.id === absA)).toBe(true);
+    expect(g.edges.some(e => e.source === absA && e.target === absOther)).toBe(true);
+  }, 15_000);
+
+  it('removes a deleted file node and its edges from the dependency graph', async () => {
+    const { rootPath, outputPath } = await setupProject();
+    const absA = join(rootPath, 'a.ts'), absB = join(rootPath, 'b.ts');
+    await writeFile(absA, "import { x } from './b';\nexport const y = x;\n", 'utf-8');
+    await writeFile(absB, 'export const x = 1;\n', 'utf-8');
+
+    const graphPath = join(outputPath, 'dependency-graph.json');
+    await writeFile(graphPath, JSON.stringify({
+      nodes: [
+        { id: absA, file: { path: 'a.ts', absolutePath: absA }, metrics: { inDegree: 0, outDegree: 1 } },
+        { id: absB, file: { path: 'b.ts', absolutePath: absB }, metrics: { inDegree: 1, outDegree: 0 } },
+      ],
+      edges: [{ source: absA, target: absB, importedNames: ['x'], isTypeOnly: false, weight: 1 }],
+    }), 'utf-8');
+
+    const watcher = new McpWatcher({ rootPath, outputPath, debounceMs: DEBOUNCE_MS });
+    watchers.push(watcher);
+    await watcher.start();
+
+    // Delete b.ts — fires chokidar 'unlink'.
+    await rm(absB);
+    await wait(WAIT_MS);
+
+    const g = JSON.parse(await readFile(graphPath, 'utf-8')) as {
+      nodes: Array<{ id: string }>;
+      edges: Array<{ source: string; target: string }>;
+    };
+    expect(g.nodes.some(n => n.id === absB), 'b.ts node should be gone').toBe(false);
+    expect(g.edges.some(e => e.target === absB), 'edges to b.ts should be gone').toBe(false);
+    expect(g.nodes.some(n => n.id === absA), 'a.ts node should remain').toBe(true);
+  }, 15_000);
+
+  it('supersession: delete-then-recreate ends indexed; recreate-then-delete ends removed', async () => {
+    const { rootPath, outputPath } = await setupProject();
+    const absA = join(rootPath, 'a.ts'), absB = join(rootPath, 'b.ts');
+    await writeFile(absA, "import { x } from './b';\nexport const y = x;\n", 'utf-8');
+    await writeFile(absB, 'export const x = 1;\n', 'utf-8');
+    const graphPath = join(outputPath, 'dependency-graph.json');
+    const seed = () => writeFile(graphPath, JSON.stringify({
+      nodes: [
+        { id: absA, file: { path: 'a.ts', absolutePath: absA }, metrics: { inDegree: 0, outDegree: 1 } },
+        { id: absB, file: { path: 'b.ts', absolutePath: absB }, metrics: { inDegree: 1, outDegree: 0 } },
+      ],
+      edges: [{ source: absA, target: absB, importedNames: ['x'], isTypeOnly: false, weight: 1 }],
+    }), 'utf-8');
+    const nodes = async () => (JSON.parse(await readFile(graphPath, 'utf-8')) as { nodes: Array<{ id: string }> }).nodes;
+
+    await seed();
+    const watcher = new McpWatcher({ rootPath, outputPath, debounceMs: DEBOUNCE_MS });
+    watchers.push(watcher);
+    await watcher.start();
+
+    // delete → recreate (in event order) ends with a.ts present.
+    await rm(absA);
+    await writeFile(absA, "import { x } from './b';\nexport const y = x + 1;\n", 'utf-8');
+    await wait(WAIT_MS);
+    expect((await nodes()).some(n => n.id === absA), 'delete→recreate ⇒ present').toBe(true);
+
+    // recreate (change) → delete ends with a.ts removed (deletion wins — the
+    // supersession guard prevents a re-add after the delete in one flush).
+    await seed();
+    await writeFile(absA, "import { x } from './b';\nexport const y = x + 2;\n", 'utf-8');
+    await rm(absA);
+    await wait(WAIT_MS);
+    expect((await nodes()).some(n => n.id === absA), 'recreate→delete ⇒ removed').toBe(false);
+  }, 20_000);
 
   it('G1: a real save primes the read cache — the next tool-call read is a HIT, not a cold re-parse', async () => {
     // The root-cause #2 fix (Spec 13.1): the watcher's write used to bump

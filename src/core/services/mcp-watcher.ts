@@ -24,7 +24,7 @@
  *     OPENLORE_WATCH_DEBUG).
  */
 
-import { readFile, writeFile, readdir } from 'node:fs/promises';
+import { readFile, writeFile, readdir, rename } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join, relative } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -38,6 +38,7 @@ import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
   ARTIFACT_LLM_CONTEXT,
+  ARTIFACT_DEPENDENCY_GRAPH,
   WATCH_DEBOUNCE_MS,
   WATCH_MAX_BATCH_MS,
   WATCH_BULK_THRESHOLD,
@@ -102,6 +103,13 @@ interface ChangedFile {
 }
 
 const SOURCE_EXTENSIONS = /\.(ts|tsx|js|jsx|py|go|rs|rb|java|kt|php|cs|cpp|cc|cxx|h|hpp|c|swift)$/;
+// HTML is watched too. detectLanguage() returns 'unknown' for it, so it takes a
+// dedicated path: an edit refreshes the literal-text line index, the inline-
+// <script> call-graph nodes (blanked → JavaScript in buildGraphSubset), and the
+// dependency-graph asset edges (<script src>/<link rel=stylesheet>). Letting HTML
+// into the call-graph loop REQUIRES the buildGraphSubset blanking — otherwise the
+// atomic swap would delete a page's inline-script nodes on every edit.
+const HTML_EXTENSIONS = /\.html?$/i;
 
 // Directory NAMES that must never be watched. Build-output and dependency
 // directories can hold hundreds of thousands of files (a Rust `target/` is
@@ -177,6 +185,7 @@ export class McpWatcher {
 
   // ── Coalescing queue (Step 1) ──────────────────────────────────────────────
   private pending = new Set<string>();              // absolute paths awaiting a flush
+  private pendingDeletions = new Set<string>();     // absolute paths of unlinked files
   private debounceTimer?: ReturnType<typeof setTimeout>;
   private maxBatchTimer?: ReturnType<typeof setTimeout>;
   private running = false;                           // single-flight for the signature flush
@@ -240,10 +249,21 @@ export class McpWatcher {
         awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 50 },
       });
 
+      const watched = (p: string): boolean => SOURCE_EXTENSIONS.test(p) || HTML_EXTENSIONS.test(p);
       this.fsWatcher.on('change', (absPath: string) => {
-        if (SOURCE_EXTENSIONS.test(absPath)) {
-          this.enqueue(absPath);
-        }
+        if (watched(absPath)) this.enqueue(absPath);
+      });
+      // A new file is indexed via the same change pipeline (insert is a no-op
+      // delete + add). ignoreInitial:true means only files created AFTER start
+      // fire 'add', so the initial scan never storms this.
+      this.fsWatcher.on('add', (absPath: string) => {
+        if (watched(absPath)) this.enqueue(absPath);
+      });
+      // A deleted file must be removed from every lane (call graph, signatures,
+      // text-line index, vector index, dependency graph) — otherwise its symbols/
+      // edges/lines linger as phantom results until the next full analyze.
+      this.fsWatcher.on('unlink', (absPath: string) => {
+        if (watched(absPath)) this.enqueueDeletion(absPath);
       });
 
       this.fsWatcher.on('ready', () => resolve());
@@ -278,12 +298,19 @@ export class McpWatcher {
     if (this.maxBatchTimer) clearTimeout(this.maxBatchTimer);
     if (this.embedTimer) clearTimeout(this.embedTimer);
     this.debounceTimer = this.maxBatchTimer = this.embedTimer = undefined;
-    // Best-effort: persist anything still queued so a save right before shutdown
-    // is not lost.
-    if (this.pending.size > 0 && !this.running) {
-      const batch = Array.from(this.pending);
-      this.pending.clear();
-      try { await this.handleBatch(batch, { syncFlush: true }); } catch { /* ignore */ }
+    // Best-effort: drain anything still queued so a save/delete right before
+    // shutdown is not lost. Deletions first, then changes (same order as flush).
+    if (!this.running) {
+      if (this.pendingDeletions.size > 0) {
+        const dels = Array.from(this.pendingDeletions);
+        this.pendingDeletions.clear();
+        try { await this.handleDeletions(dels); } catch { /* ignore */ }
+      }
+      if (this.pending.size > 0) {
+        const batch = Array.from(this.pending);
+        this.pending.clear();
+        try { await this.handleBatch(batch, { syncFlush: true }); } catch { /* ignore */ }
+      }
     }
     await this.fsWatcher?.close();
     await this.gitWatcher?.close();
@@ -298,6 +325,20 @@ export class McpWatcher {
    */
   private enqueue(absPath: string): void {
     this.pending.add(absPath);
+    // A re-create supersedes a pending delete for the same path.
+    this.pendingDeletions.delete(absPath);
+    this.armFlush();
+  }
+
+  /** Queue a file deletion for the next flush (reuses the same debounce). */
+  private enqueueDeletion(absPath: string): void {
+    this.pendingDeletions.add(absPath);
+    // A delete supersedes a pending change for the same path.
+    this.pending.delete(absPath);
+    this.armFlush();
+  }
+
+  private armFlush(): void {
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     this.debounceTimer = setTimeout(() => this.flush(), this.debounceMs);
     if (!this.maxBatchTimer) {
@@ -324,16 +365,22 @@ export class McpWatcher {
     if (this.debounceTimer) { clearTimeout(this.debounceTimer); this.debounceTimer = undefined; }
     if (this.maxBatchTimer) { clearTimeout(this.maxBatchTimer); this.maxBatchTimer = undefined; }
     if (this.running) return;            // a follow-up is scheduled in finally{}
-    if (this.pending.size === 0) return;
+    if (this.pending.size === 0 && this.pendingDeletions.size === 0) return;
 
     const batch = Array.from(this.pending);
+    const deletions = Array.from(this.pendingDeletions);
     this.pending.clear();
+    this.pendingDeletions.clear();
     this.running = true;
-    this.handleBatch(batch)
+    // Deletions first (remove stale state), then re-index the changed/added files.
+    (async () => {
+      if (deletions.length > 0) await this.handleDeletions(deletions);
+      if (batch.length > 0) await this.handleBatch(batch);
+    })()
       .catch((err) => process.stderr.write(`[mcp-watcher] error: ${(err as Error).message}\n`))
       .finally(() => {
         this.running = false;
-        if (this.pending.size > 0) {
+        if (this.pending.size > 0 || this.pendingDeletions.size > 0) {
           this.debounceTimer = setTimeout(() => this.flush(), this.debounceMs);
         }
       });
@@ -367,7 +414,9 @@ export class McpWatcher {
     for (const abs of absPaths) {
       const rel = relative(this.rootPath, abs);
       if (isTestFile(rel)) continue;
-      if (detectLanguage(rel) === 'unknown') continue;
+      // HTML is 'unknown' to detectLanguage but takes the dedicated HTML path
+      // (text-line + inline-script call graph + dependency asset edges).
+      if (detectLanguage(rel) === 'unknown' && !HTML_EXTENSIONS.test(rel)) continue;
       let content: string;
       try {
         content = await readFile(abs, 'utf-8');
@@ -460,16 +509,18 @@ export class McpWatcher {
     }
     await this.persistContext(context);
 
-    // 3.5. Literal-text line index — keep it fresh for the changed files. Runs
-    //      regardless of the embed setting (the text index is BM25-only).
-    //      Scope (consistent with the symbol index in watch mode): the watcher
-    //      reacts only to 'change' events on SOURCE_EXTENSIONS files — there is
-    //      no 'unlink' handler — so neither markup/stylesheet edits nor file
-    //      DELETIONS are live-reconciled here. A deleted file's lines linger
-    //      until the next full `analyze`, which overwrites the table completely
-    //      (the same staleness the symbol index already carries for deleted
-    //      files). This keeps code-file literals (e.g. JSX strings) current.
+    // 3.5. Literal-text line index — keep it fresh for the changed files
+    //      (source + HTML). Runs regardless of the embed setting (BM25-only).
+    //      File deletions are handled separately by handleDeletions (the 'unlink'
+    //      lane), which drops the removed file's lines from this index.
     await this.updateTextLines(changedFiles);
+
+    // 3.6. Dependency graph — keep dependency-graph.json's file→file import edges
+    //      live (get_file_dependencies reads that static artifact). Incremental,
+    //      O(change): re-resolve the changed files' imports and splice their
+    //      edges, recompute in/out-degree. Global metrics (pageRank, clusters,
+    //      betweenness) are O(graph) and left to the next full `analyze`.
+    await this.updateDependencyGraph(changedFiles);
 
     // 4. Vector update — decoupled from signature freshness (Step 4).
     const isBulk = consumedVcsBulk || changedFiles.length >= this.bulkThreshold;
@@ -680,6 +731,219 @@ export class McpWatcher {
     }
   }
 
+  /**
+   * Incrementally patch dependency-graph.json's file→file import edges for the
+   * changed files. `get_file_dependencies` reads that static artifact, so without
+   * this an import edit goes stale until a full `analyze`. O(change): re-resolve
+   * each changed file's imports (reusing the builder's `computeFileImportEdges`,
+   * so resolution can't drift), replace that file's import edges, and recompute
+   * in/out-degree. HTTP- and call-graph-synthesized edges are preserved (the
+   * watcher does not rebuild them). Global metrics (pageRank, betweenness,
+   * clusters) are O(graph) and deliberately left to the next full `analyze`.
+   * No-op when no dependency graph exists. Never throws into the batch loop.
+   */
+  private async updateDependencyGraph(changedFiles: ChangedFile[]): Promise<void> {
+    const graphPath = join(this.outputPath, ARTIFACT_DEPENDENCY_GRAPH);
+    try {
+      let raw: string;
+      try {
+        raw = await readFile(graphPath, 'utf-8');
+      } catch {
+        return; // no dependency graph yet — nothing to keep fresh
+      }
+      // Narrow view for the fields we touch. We MUTATE the parsed object in place
+      // and re-serialize it, so untyped node fields not modeled here (file,
+      // exports, cluster, metrics.pageRank/betweenness) survive the round-trip.
+      const graph = JSON.parse(raw) as {
+        nodes: Array<{ id: string; file?: { path: string; absolutePath: string }; exports?: unknown[]; metrics?: Record<string, number> }>;
+        edges: Array<{ source: string; target: string; httpEdge?: unknown; isCallEdge?: boolean }>;
+      };
+      if (!Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) return;
+
+      const { ImportExportParser } = await import('../analyzer/import-parser.js');
+      const { computeFileImportEdges } = await import('../analyzer/dependency-graph.js');
+      const fileSet = new Set(graph.nodes.map((n) => n.id)); // absolute paths
+      const parser = new ImportExportParser();
+      let changed = false;
+
+      for (const f of changedFiles) {
+        const abs = join(this.rootPath, f.rel);
+        let analysis;
+        try {
+          analysis = await parser.parseFile(abs);
+        } catch {
+          continue;
+        }
+        if (!fileSet.has(abs)) {
+          // New file (watch 'add'): create a node so its OUTGOING imports are
+          // tracked. Added AFTER a successful parse so a parse failure can't leave
+          // a bogus edgeless node. Incoming edges (importers of this file) refresh
+          // when those importers are next touched, or on the next full analyze.
+          graph.nodes.push({ id: abs, file: { path: f.rel, absolutePath: abs }, exports: [], metrics: { inDegree: 0, outDegree: 0 } });
+          fileSet.add(abs);
+        }
+        const newEdges = await computeFileImportEdges(abs, analysis, fileSet, this.rootPath);
+        // Drop this file's previous IMPORT edges (keep HTTP / call-synthesized
+        // edges, which the watcher does not rebuild), then splice in the fresh set.
+        graph.edges = graph.edges.filter(
+          (e) => e.source !== abs || e.httpEdge !== undefined || e.isCallEdge === true,
+        );
+        graph.edges.push(...(newEdges as typeof graph.edges));
+        changed = true;
+      }
+      if (!changed) return;
+
+      // Recompute file-level in/out degree from the patched edge set (cheap).
+      const out = new Map<string, Set<string>>();
+      const inn = new Map<string, Set<string>>();
+      for (const n of graph.nodes) {
+        out.set(n.id, new Set());
+        inn.set(n.id, new Set());
+      }
+      for (const e of graph.edges) {
+        out.get(e.source)?.add(e.target);
+        inn.get(e.target)?.add(e.source);
+      }
+      for (const n of graph.nodes) {
+        if (!n.metrics) n.metrics = {};
+        n.metrics.outDegree = out.get(n.id)?.size ?? 0;
+        n.metrics.inDegree = inn.get(n.id)?.size ?? 0;
+      }
+
+      // Atomic write (tmp + rename) so a concurrent MCP read never sees a torn
+      // JSON — matching the watcher's "readers never see a torn graph" invariant.
+      const tmp = `${graphPath}.${process.pid}.tmp`;
+      await writeFile(tmp, JSON.stringify(graph));
+      await rename(tmp, graphPath);
+      if (this.debug) {
+        process.stderr.write(
+          `[mcp-watcher] dependency graph: patched import edges for ${changedFiles.length} file(s)\n`,
+        );
+      }
+    } catch (err) {
+      process.stderr.write(`[mcp-watcher] dependency-graph error: ${(err as Error).message}\n`);
+    }
+  }
+
+  /**
+   * Reconcile file DELETIONS across every lane so a removed file leaves no
+   * phantom state: call-graph nodes/edges (incoming and outgoing), signatures,
+   * text-line rows, vector rows, and dependency-graph node + edges. Best-effort;
+   * a failure in one lane does not block the others.
+   */
+  private async handleDeletions(absPaths: string[]): Promise<void> {
+    // Deletion is idempotent removal, so no need to filter — each lane no-ops for
+    // a path it never indexed. (Watch-ignored paths like *.test.ts never reach
+    // here anyway: chokidar prunes them, so no unlink fires.)
+    const rels = absPaths.map((abs) => relative(this.rootPath, abs));
+    if (rels.length === 0) return;
+
+    // 1. Call-graph store — deleteEdgesForFile removes edges where the file is
+    //    caller OR callee, so incoming edges don't dangle.
+    if (EdgeStore.exists(this.outputPath)) {
+      const store = EdgeStore.open(EdgeStore.dbPath(this.outputPath));
+      try {
+        store.transaction(() => {
+          for (const rel of rels) {
+            store.deleteEdgesForFile(rel);
+            store.deleteNodesForFile(rel);
+            store.deleteCfgForFile(rel);
+            store.deleteClassesForFile(rel);
+          }
+        });
+      } catch (err) {
+        process.stderr.write(`[mcp-watcher] delete (graph) error: ${(err as Error).message}\n`);
+      } finally {
+        store.close();
+      }
+    }
+
+    // 2. Signatures in llm-context.json.
+    const context = await this.loadContext();
+    if (context?.signatures) {
+      const relSet = new Set(rels);
+      const kept = context.signatures.filter((m) => !relSet.has(m.path));
+      if (kept.length !== context.signatures.length) {
+        context.signatures = kept;
+        await this.persistContext(context);
+      }
+    }
+
+    // 3. Text-line index — drop the deleted files' lines.
+    try {
+      const { TextLineIndex } = await import('../analyzer/text-line-index.js');
+      if (TextLineIndex.exists(this.outputPath)) {
+        await TextLineIndex.updateFiles(this.outputPath, [], rels);
+      }
+    } catch (err) {
+      process.stderr.write(`[mcp-watcher] delete (text) error: ${(err as Error).message}\n`);
+    }
+
+    // 4. Vector index — delete the deleted files' rows (no nodes to add).
+    try {
+      const { VectorIndex } = await import('../analyzer/vector-index.js');
+      if (VectorIndex.exists(this.outputPath)) {
+        await VectorIndex.updateFiles(
+          this.outputPath, [], new Set(rels), context?.signatures ?? [],
+          new Set(), new Set(), undefined,
+        );
+      }
+    } catch (err) {
+      process.stderr.write(`[mcp-watcher] delete (vector) error: ${(err as Error).message}\n`);
+    }
+
+    // 5. Dependency graph — remove the deleted nodes and every edge touching them.
+    await this.removeFromDependencyGraph(absPaths);
+
+    if (this.debug) {
+      process.stderr.write(`[mcp-watcher] reconciled ${rels.length} deletion(s)\n`);
+    }
+  }
+
+  /**
+   * Remove deleted files' nodes and any edge referencing them from
+   * dependency-graph.json, recompute degrees, and persist atomically.
+   */
+  private async removeFromDependencyGraph(absPaths: string[]): Promise<void> {
+    const graphPath = join(this.outputPath, ARTIFACT_DEPENDENCY_GRAPH);
+    try {
+      let raw: string;
+      try {
+        raw = await readFile(graphPath, 'utf-8');
+      } catch {
+        return;
+      }
+      const graph = JSON.parse(raw) as {
+        nodes: Array<{ id: string; metrics?: Record<string, number> }>;
+        edges: Array<{ source: string; target: string }>;
+      };
+      if (!Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) return;
+
+      const removed = new Set(absPaths);
+      const nodesBefore = graph.nodes.length;
+      graph.nodes = graph.nodes.filter((n) => !removed.has(n.id));
+      const edgesBefore = graph.edges.length;
+      graph.edges = graph.edges.filter((e) => !removed.has(e.source) && !removed.has(e.target));
+      if (graph.nodes.length === nodesBefore && graph.edges.length === edgesBefore) return;
+
+      const out = new Map<string, Set<string>>();
+      const inn = new Map<string, Set<string>>();
+      for (const n of graph.nodes) { out.set(n.id, new Set()); inn.set(n.id, new Set()); }
+      for (const e of graph.edges) { out.get(e.source)?.add(e.target); inn.get(e.target)?.add(e.source); }
+      for (const n of graph.nodes) {
+        if (!n.metrics) n.metrics = {};
+        n.metrics.outDegree = out.get(n.id)?.size ?? 0;
+        n.metrics.inDegree = inn.get(n.id)?.size ?? 0;
+      }
+
+      const tmp = `${graphPath}.${process.pid}.tmp`;
+      await writeFile(tmp, JSON.stringify(graph));
+      await rename(tmp, graphPath);
+    } catch (err) {
+      process.stderr.write(`[mcp-watcher] delete (dep-graph) error: ${(err as Error).message}\n`);
+    }
+  }
+
   // ── Helpers ──────────────────────────────────────────────────────────────────
 
   /** Bounded count of watched source files; stops early once `cap` is exceeded. */
@@ -719,8 +983,10 @@ export class McpWatcher {
  * Re-parse changedFile + up to CALLER_REPARSE_LIMIT callerFiles.
  * Returns fresh edges (all files in subset) and nodes (changedFile only —
  * callerFiles nodes are untouched since their function signatures didn't change).
+ *
+ * Exported for unit testing (locks the HTML-blanking node-refresh contract).
  */
-async function buildGraphSubset(
+export async function buildGraphSubset(
   changedRel: string,
   changedContent: string,
   callerFiles: string[],
@@ -731,13 +997,25 @@ async function buildGraphSubset(
   nodes: import('../analyzer/call-graph.js').FunctionNode[];
   cfgs: Array<{ functionId: string; filePath: string; cfg: import('../analyzer/cfg.js').FunctionCfg }>;
 }> {
-  const lang = detectLanguage(changedRel);
+  let lang = detectLanguage(changedRel);
+  let content = changedContent;
+  // HTML: blank everything outside inline <script> bodies (offset-preserving) so
+  // the JS extractor parses the inline scripts at their true positions. Without
+  // this, html is 'unknown' → empty result → the caller's atomic swap would
+  // DELETE the page's inline-script nodes on every edit (regression).
+  if (lang === 'unknown' && HTML_EXTENSIONS.test(changedRel)) {
+    const { extractHtmlScripts } = await import('../analyzer/html-script-extractor.js');
+    const blanked = extractHtmlScripts(changedContent);
+    if (!blanked) return { edges: [], nodes: [], cfgs: [] }; // no inline JS
+    content = blanked;
+    lang = 'JavaScript';
+  }
   if (!CALL_GRAPH_LANGS.has(lang)) return { edges: [], nodes: [], cfgs: [] };
 
   const { CallGraphBuilder } = await import('../analyzer/call-graph.js');
   // Use relative paths as node IDs (consistent with analyze output)
   const files: Array<{ path: string; content: string; language: string }> = [
-    { path: changedRel, content: changedContent, language: lang },
+    { path: changedRel, content, language: lang },
   ];
 
   for (const cf of callerFiles.slice(0, CALLER_REPARSE_LIMIT)) {
