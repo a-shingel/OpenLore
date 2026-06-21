@@ -146,6 +146,21 @@ describe.skipIf(!haveCli)('panic CLI — e2e against the built binary', () => {
     expect(JSON.parse(readFileSync(artifact, 'utf-8')).hotspots[0].module).toBe('auth');
   });
 
+  it('panic-validate --strict exits 1 on insufficient data, 0 without --strict', () => {
+    const tel = join(dir, '.openlore', 'telemetry');
+    mkdirSync(tel, { recursive: true });
+    // A handful of episodes — below the MIN_EPISODES threshold.
+    const ev: Record<string, unknown>[] = [];
+    for (let i = 0; i < 3; i++) {
+      ev.push({ ts: new Date(1_700_000_000_000 + i * 1000).toISOString(), event: 'panic_level_change', from_level: 0, to_level: 2 });
+      ev.push({ ts: new Date(1_700_000_000_000 + i * 1000 + 500).toISOString(), event: 'panic_level_change', from_level: 2, to_level: 0 });
+    }
+    writeFileSync(join(tel, 'panic.jsonl'), ev.map((e) => JSON.stringify(e)).join('\n') + '\n');
+
+    expect(run(['panic-validate', '--directory', dir, '--strict']).code).toBe(1);
+    expect(run(['panic-validate', '--directory', dir]).code).toBe(0); // report mode always 0
+  });
+
   it('gryph-watch exits cleanly and writes no PID file when mode is off (safe default)', () => {
     setMode(dir, 'off');
     rmSync(join(dir, '.openlore', 'gryph-watch.pid'), { force: true });

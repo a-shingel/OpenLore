@@ -65,16 +65,26 @@ function render(report: PanicGateReport): string {
 }
 
 export const panicValidateCommand = new Command('panic-validate')
-  .description('Observe-mode accuracy gate report from panic telemetry (read-only, exits 0)')
+  .description('Observe-mode accuracy gate report from panic telemetry (read-only)')
   .option('-d, --directory <path>', 'Project directory', process.cwd())
   .option('--json', 'Emit the gate report as JSON', false)
-  .action((options: { directory: string; json: boolean }) => {
+  .option('--strict', 'Exit 1 if the gate criteria are not met (for CI/automation). Default exits 0.', false)
+  .action((options: { directory: string; json: boolean; strict: boolean }) => {
+    let exitCode = 0;
     try {
       const events = readPanicEvents(options.directory);
       const report = validatePanicSignal(events);
       process.stdout.write(options.json ? JSON.stringify(report, null, 2) + '\n' : render(report) + '\n');
+      if (options.strict) {
+        // Strict pass = enough data AND no criterion explicitly failing. follow_through is null in
+        // pure observe mode (no interventions yet), which is acceptable for the observe→advisory step.
+        const c = report.criteria;
+        const pass = c.data_sufficient && c.fp_ok !== false && c.follow_through_ok !== false;
+        exitCode = pass ? 0 : 1;
+      }
     } catch {
-      // fail-open: never break a maintainer's terminal
+      // fail-open: never break a maintainer's terminal (strict still reports failure via exit 1)
+      if (options.strict) exitCode = 1;
     }
-    process.exit(0);
+    process.exit(exitCode);
   });
