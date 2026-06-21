@@ -69,12 +69,15 @@ heavy-infrastructure part behind opt-in modes and follow-up PRs that must prove 
 These are the parts that carry real cost, external dependencies, or unproven intervention. They do
 **not** land in this change.
 
-| Deferred item | Why it waits |
-|---|---|
-| **`experimental_blocking` mode** (emits a block decision to the runtime) | Intervention-by-enforcement. We do not ship this until `observe`-mode telemetry shows the signal is accurate enough to act on. |
-| **Gryph integration** (`gryph-bridge.ts`, `gryph-watch.ts`, the daemon, PID files, the external `safedep/gryph` binary, CAS multi-writer writes) | New external dependency + a long-lived background process. Large maintenance surface for a second-order benefit. Re-evaluated on its own merits. |
-| **Auto-installed hooks** (`setup --hooks` wiring PreToolUse panic-check + UserPromptSubmit gryph-watch) | Default install footprint. Users opt in manually until the core is validated. |
-| **The observe → memory feedback loop** | The piece that most directly serves the north star: turning "agents reliably get lost in module X on this repo" into a durable memory/orient signal. Designed as its own change once observe-mode data exists. |
+Each is captured as its own tracked change proposal so none of @laurentftech's work (PR #83) is lost —
+nothing is thrown away; the heavy parts just land later on their own merits.
+
+| Deferred item | Tracked follow-up | Why it waits |
+|---|---|---|
+| **`experimental_blocking` mode** (emits a block decision to the runtime) | `defer-panic-blocking-enforcement` | Intervention-by-enforcement. Hard-gated on observe-mode accuracy: a false positive can block a correct tool call. |
+| **Gryph integration** (`gryph-bridge.ts`, `gryph-watch.ts`, the daemon, PID files, the external `safedep/gryph` binary, CAS multi-writer writes) | `defer-gryph-runtime-observability` | New external dependency + a long-lived background process. Inert plumbing (`gryphWindowStart`, CAS, `GRYPH_*`) already in place for a clean re-attach. |
+| **Auto-installed hooks** (`setup --hooks` / `--panic`) | `defer-panic-setup-hooks` | Default install footprint; also sidestepped the `installClaudeHook` compile break. Users opt in via config until validated. |
+| **The observe → memory feedback loop** | `add-behavioral-observability-to-memory` | The piece that most directly serves the north star: turning "agents reliably get lost in module X" into a durable memory/orient signal that helps the *next* agent before it starts. |
 
 ## The validation gate (the constraint that governs everything above)
 
