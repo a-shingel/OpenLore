@@ -542,6 +542,103 @@ const NAV_TOOLS: NavToolSpec[] = [
     guideline: 'Before a PR, call openlore_get_surprising_connections to spot accidental coupling.',
     parameters: Type.Object({ limit: Type.Optional(Type.Number()) }),
   },
+  {
+    name: 'get_architecture_overview',
+    label: 'openlore get_architecture_overview',
+    description: 'Get a bird\'s-eye view of the codebase — domain clusters, cross-cluster dependencies, entry points, and critical hubs.',
+    guideline: 'Before planning a large feature or onboarding to an unknown area, call openlore_get_architecture_overview for a structural overview.',
+    parameters: Type.Object({}),
+  },
+  {
+    name: 'get_refactor_report',
+    label: 'openlore get_refactor_report',
+    description: 'List functions that need refactoring, ranked by priority: hub overload, god functions, SRP violations, cyclic dependencies.',
+    guideline: 'Before starting a refactor, call openlore_get_refactor_report to find the highest-priority targets.',
+    parameters: Type.Object({}),
+  },
+  {
+    name: 'get_critical_hubs',
+    label: 'openlore get_critical_hubs',
+    description: 'Find the most-called functions — modifying them has the widest blast radius and requires the most careful refactoring.',
+    guideline: 'Before touching widely-used code, call openlore_get_critical_hubs to see which functions are the most sensitive to change.',
+    parameters: Type.Object({
+      limit: Type.Optional(Type.Number()),
+      minFanIn: Type.Optional(Type.Number({ description: 'Minimum number of callers to be considered a hub (default: 3)' })),
+    }),
+  },
+  {
+    name: 'get_god_functions',
+    label: 'openlore get_god_functions',
+    description: 'Find god functions (high fan-out orchestrators) that call too many things and likely need to be split.',
+    guideline: 'When a function feels too large or does too much, call openlore_get_god_functions to find orchestrator candidates for refactoring.',
+    parameters: Type.Object({
+      filePath: Type.Optional(Type.String({ description: 'Restrict search to this file (relative path)' })),
+      fanOutThreshold: Type.Optional(Type.Number({ description: 'Minimum fan-out to be considered a god function (default: 8)' })),
+    }),
+  },
+  {
+    name: 'search_specs',
+    label: 'openlore search_specs',
+    description: 'Search OpenSpec specifications by meaning — find which requirement covers a concept.',
+    guideline: 'Before writing code for a feature, call openlore_search_specs to find what the spec says about it.',
+    parameters: Type.Object({
+      query: Type.String({ description: 'REQUIRED. Natural language query, e.g. "email validation workflow"' }),
+      limit: Type.Optional(Type.Number()),
+      domain: Type.Optional(Type.String({ description: 'Filter by domain name (e.g. "auth", "analyzer")' })),
+      section: Type.Optional(Type.String({ description: 'Filter by section type: "requirements", "purpose", "design"' })),
+    }),
+  },
+  {
+    name: 'search_unified',
+    label: 'openlore search_unified',
+    description: 'Search code and specs simultaneously — returns functions and requirements that match, cross-boosted when they are linked.',
+    guideline: 'When you want to find where something is implemented AND what the spec says about it in one call, use openlore_search_unified.',
+    parameters: Type.Object({
+      query: Type.String({ description: 'REQUIRED. Natural language query, e.g. "validate user authentication"' }),
+      limit: Type.Optional(Type.Number()),
+      language: Type.Optional(Type.String({ description: 'Filter code results by language (e.g. "TypeScript")' })),
+      domain: Type.Optional(Type.String({ description: 'Filter spec results by domain name' })),
+      section: Type.Optional(Type.String({ description: 'Filter spec results by section type' })),
+    }),
+  },
+  {
+    name: 'get_spec',
+    label: 'openlore get_spec',
+    description: 'Read the full specification for a domain — all requirements, scenarios, and linked source files.',
+    guideline: 'When you know which spec domain covers your task, call openlore_get_spec with the domain name to read its requirements before writing code.',
+    parameters: Type.Object({
+      domain: Type.String({ description: 'REQUIRED. Domain name (e.g. "auth", "analyzer") — use search_specs to discover domain names.' }),
+    }),
+  },
+  {
+    name: 'get_function_body',
+    label: 'openlore get_function_body',
+    description: 'Read the exact source code of a function by name and file.',
+    guideline: 'After search_code or get_function_skeleton identifies a function, call openlore_get_function_body to read its full implementation instead of opening the file.',
+    parameters: Type.Object({
+      filePath: Type.String({ description: 'REQUIRED. File path relative to the project directory, e.g. "src/auth/jwt.ts"' }),
+      functionName: Type.String({ description: 'REQUIRED. Name of the function to extract, e.g. "verifyToken"' }),
+    }),
+  },
+  {
+    name: 'get_file_dependencies',
+    label: 'openlore get_file_dependencies',
+    description: 'Show what a file imports and what files import it — the coupling picture for a single file.',
+    guideline: 'Before moving, deleting, or refactoring a file, call openlore_get_file_dependencies to understand its coupling.',
+    parameters: Type.Object({
+      filePath: Type.String({ description: 'REQUIRED. File path relative to the project root, e.g. "src/core/analyzer/vector-index.ts"' }),
+      direction: Type.Optional(StringEnum(['imports', 'importedBy', 'both'] as const)),
+    }),
+  },
+  {
+    name: 'get_decisions',
+    label: 'openlore get_decisions',
+    description: 'List or search architectural decision records (ADRs) — the documented "why" behind design choices.',
+    guideline: 'When you wonder why a pattern exists or need to check if a decision is already documented, call openlore_get_decisions.',
+    parameters: Type.Object({
+      query: Type.Optional(Type.String({ description: 'Optional text filter — returns only ADRs whose title or content contains this string' })),
+    }),
+  },
 ];
 
 function toolResult(text: string, details: unknown = null): AgentToolResult<unknown> {
@@ -652,7 +749,7 @@ function resultText(result: AgentToolResult<unknown>): unknown {
 }
 
 // The descriptive argument that names a tool call, tried in order.
-const CALL_ARG_KEYS = ['task', 'query', 'symbol', 'functionName', 'description', 'filePath'];
+const CALL_ARG_KEYS = ['task', 'query', 'symbol', 'functionName', 'description', 'filePath', 'domain'];
 const MAX_CALL_ARG = 80;
 
 /**
