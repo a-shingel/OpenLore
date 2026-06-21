@@ -74,6 +74,14 @@ export const panicCheckCommand = new Command('panic-check')
         });
       }
 
+      // experimental_blocking: emit a block signal at L4 — the runtime decides enforcement.
+      // advisory:true is always present: OpenLore recommends, never mandates. Still exits 0.
+      if (mode === 'experimental_blocking' && state.panicLevel >= 4) {
+        const blockOutput = { decision: 'block' as const, advisory: true, panicLevel: state.panicLevel, message: output.message };
+        process.stdout.write(JSON.stringify(blockOutput) + '\n');
+        process.exit(0);
+      }
+
       process.stdout.write(formatOutput(output, format) + '\n');
     } catch {
       // fail-open: any error → silent exit 0

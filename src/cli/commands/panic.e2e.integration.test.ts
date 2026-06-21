@@ -85,6 +85,26 @@ describe.skipIf(!haveCli)('panic CLI — e2e against the built binary', () => {
     expect(level.stdout.trim()).toBe('P:L3');
   });
 
+  it('experimental_blocking emits a block signal (advisory:true) only at L4, never below', () => {
+    setMode(dir, 'experimental_blocking');
+    // L4 → block, with advisory:true (runtime decides), still exit 0.
+    writeState(dir, freshState({ panicScore: 90, panicLevel: 4 }));
+    const l4 = run(['panic-check', '--directory', dir]);
+    expect(l4.code).toBe(0);
+    const b = JSON.parse(l4.stdout.trim());
+    expect(b.decision).toBe('block');
+    expect(b.advisory).toBe(true);
+    // L3 → warn, not block.
+    writeState(dir, freshState({ panicScore: 50, panicLevel: 3 }));
+    expect(JSON.parse(run(['panic-check', '--directory', dir]).stdout.trim()).decision).not.toBe('block');
+  });
+
+  it('advisory mode never blocks, even at L4 (blocking is opt-in)', () => {
+    setMode(dir, 'advisory');
+    writeState(dir, freshState({ panicScore: 90, panicLevel: 4 }));
+    expect(JSON.parse(run(['panic-check', '--directory', dir]).stdout.trim()).decision).not.toBe('block');
+  });
+
   it('fails open on a corrupt state file (decision allow, exit 0)', () => {
     setMode(dir, 'advisory');
     writeFileSync(join(dir, '.openlore', 'panic-state.json'), 'not json {{{');
