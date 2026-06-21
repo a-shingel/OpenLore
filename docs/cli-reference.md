@@ -20,6 +20,7 @@
 | `openlore view` | Launch interactive graph & spec viewer in the browser | No |
 | `openlore setup` | Install workflow skills into the project (Vibe, Cline, GSD, BMAD, Pi) | No |
 | `openlore federation add\|remove\|list` | Manage the multi-repo federation registry (index-of-indexes) | No |
+| `openlore spec-store status` | Report the health of the spec-store binding (read-only, advisory) | No |
 | `openlore mcp` | Start MCP server (stdio, for Cline / Claude Code) | No |
 | `openlore serve` | Start a warm local HTTP daemon exposing tools (loopback, for Pi / editors) | No |
 | `openlore doctor` | Check environment and configuration for common issues | No |
@@ -203,6 +204,17 @@ openlore federation list                          # alias: ls — shows each rep
 
 Index state per repo: `✓ indexed`, `⚠ stale` (re-run `openlore analyze` there), `∅ unindexed`, or `✗ missing path`. Once a repo is registered, the four cross-repo conclusion tools — `analyze_impact`, `find_dead_code`, `select_tests`, `find_path` — accept an opt-in `federation` (or `federationRepos`) flag and report which repos were consulted vs skipped. The registry-status tool `federation_status` is exposed only under `openlore mcp --preset federation`. See [docs/federation.md](federation.md).
 
+#### Spec-store binding
+
+A **spec-store binding** points OpenLore at an external spec repository (one that holds specs/changes) and declares the code repositories its plans `targets` and `references`. The declared names resolve against the federation registry above. Configure it in `.openlore/config.json` (see [Configuration](configuration.md#spec-store-binding)), then check its health:
+
+```bash
+openlore spec-store status            # human-readable: per-target resolution + index state, references, store path
+openlore spec-store status --json     # stable finding codes for an orchestrator (see docs/mcp-tools.md)
+```
+
+Read-only and advisory — it reports binding health and always exits 0; it never blocks. Findings carry stable codes (`target-unresolved`, `index-stale`, `reference-missing`, `registry-unreadable`, …) each with a pasteable remediation. The matching MCP tool `spec_store_status` is exposed under `openlore mcp --preset federation`.
+
 ---
 
 ## Serve (warm daemon)
@@ -216,7 +228,7 @@ over plain HTTP so non-MCP clients (e.g. the [Pi](https://pi.dev) extension in
 
 ```bash
 openlore serve                          # navigation preset, ephemeral port, watch on
-openlore serve --preset all --port 7077 # all 59 tools on a fixed port
+openlore serve --preset all --port 7077 # all 60 tools on a fixed port
 openlore serve --no-watch               # transport only, no freshness lane
 openlore serve --stop                   # stop the daemon serving this directory
 ```

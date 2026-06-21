@@ -99,6 +99,19 @@ Cross-repo resolution is deterministic: a consumer's external call site is match
 
 The capability is **opt-in**: the registry-status tool `federation_status` and the federation scope are exposed only under `openlore mcp --preset federation`. The default and `minimal` surfaces register no federation capability. See [docs/cli-reference.md](cli-reference.md#federation-multi-repo) for the full CLI and index-state semantics.
 
+### Spec-store binding (built on the registry)
+
+The registry above answers "which peer repos exist and are they indexed." A **spec-store binding** sits one layer up: it points OpenLore at an external **spec store** — a standalone repository that holds specs/changes — and declares the code repositories that store's plans are *about* (`targets`) and the ones they draw on for *context* (`references`). Those `targets`/`references` are **names**, resolved against the same federation registry — so the binding adds no new index machinery; it is a thin declarative layer over the index-of-indexes.
+
+Configure it in `.openlore/config.json` (see [docs/configuration.md](configuration.md#spec-store-binding)) and check its health:
+
+```bash
+openlore spec-store status            # per-target resolution + index state, references, store path
+openlore spec-store status --json     # stable finding codes for an orchestrator
+```
+
+`spec_store_status` (the matching MCP tool, also under `--preset federation`) is read-only and conclusion-shaped: it never throws — a corrupt registry degrades to a `registry-unreadable` finding rather than an error — and never blocks. It is the foundation of a broader integration (assembling working-set context and certifying change impact across the declared targets); those build on this binding.
+
 ### Honest limits
 
 - **Staleness is only as fresh as each peer's last real `analyze`.** A peer is flagged `stale` by comparing its registered fingerprint against the one written to `.openlore/analysis/fingerprint.json` — which only changes when `openlore analyze` actually rebuilds. If you edit a peer and re-run `analyze` inside its recency window (the analyze TTL short-circuits the rebuild), the fingerprint does not move and the peer still reads as `indexed`. Run `openlore analyze --force` in a peer to be certain its index — and therefore its federation freshness — is current.
