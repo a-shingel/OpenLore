@@ -1,5 +1,9 @@
 # Gryph runtime observability (deferred follow-up from PR #83)
 
+> **UPDATE (2026-06-21): BUILT in PR #175** — Gryph re-attached fail-open (no-op when the `gryph`
+> binary is absent; `gryph-watch` exits silently on mode:'off'). The DEFERRED notes below are kept
+> for design history.
+>
 > Status: DEFERRED — carved out of the agent-behavioral-governance adoption (PR #175) to land the
 > deterministic core first. This proposal preserves @laurentftech's Gryph design (PR #83) so it is
 > not lost. Build only after the observe-mode accuracy gate is cleared

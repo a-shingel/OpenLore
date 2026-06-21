@@ -3,9 +3,16 @@
 > Status: IN PROGRESS (2026-06-21) — adopting `laurentftech`'s Panic Response Layer (PR #83,
 > `feat/panic-response-layer`, ~3,822 LOC) onto current `main`. PR #83 was opened against `v2.0.1`
 > and is 513 commits stale; it does not merge or compile cleanly as-is. This change rebases the work
-> onto current `main`, lands a **helpful core behind safe defaults**, and **stages the heavy machinery
-> into follow-ups** so we never ship intervention before we have validated it is accurate.
-> Work branch: `feat/agent-behavioral-governance`.
+> onto current `main` and now builds out the **full feature** in PR #175 — everything **opt-in and
+> off by default**, with the observe-mode accuracy gate as the hard constraint on enabling any
+> interventional posture. Work branch: `feat/agent-behavioral-governance`.
+>
+> UPDATE (2026-06-21): the work originally staged into follow-up PRs is now built **in this PR**,
+> behind safe defaults — Gryph runtime observability (fail-open), `experimental_blocking` (opt-in),
+> `setup --hooks`/`--panic` installers (opt-in, never default), the expanded observe-mode validation
+> gate (`openlore panic-validate`), and the observe→memory feedback loop
+> (`openlore panic-hotspots`). The four `defer-*` / `add-*` proposals are marked BUILT accordingly.
+> Every default remains `off`; nothing interventional ships enabled-by-default before the gate clears.
 
 ## Why
 
@@ -69,15 +76,19 @@ heavy-infrastructure part behind opt-in modes and follow-up PRs that must prove 
 These are the parts that carry real cost, external dependencies, or unproven intervention. They do
 **not** land in this change.
 
-Each is captured as its own tracked change proposal so none of @laurentftech's work (PR #83) is lost —
-nothing is thrown away; the heavy parts just land later on their own merits.
+Originally staged into follow-up PRs; now **all built in this PR (#175)** behind safe defaults. Each
+is tracked by its own change proposal (now marked BUILT) so the design + gates stay documented.
 
-| Deferred item | Tracked follow-up | Why it waits |
+| Item | Tracked proposal | Status in #175 |
 |---|---|---|
-| **`experimental_blocking` mode** (emits a block decision to the runtime) | `defer-panic-blocking-enforcement` | Intervention-by-enforcement. Hard-gated on observe-mode accuracy: a false positive can block a correct tool call. |
-| **Gryph integration** (`gryph-bridge.ts`, `gryph-watch.ts`, the daemon, PID files, the external `safedep/gryph` binary, CAS multi-writer writes) | `defer-gryph-runtime-observability` | New external dependency + a long-lived background process. Inert plumbing (`gryphWindowStart`, CAS, `GRYPH_*`) already in place for a clean re-attach. |
-| **Auto-installed hooks** (`setup --hooks` / `--panic`) | `defer-panic-setup-hooks` | Default install footprint; also sidestepped the `installClaudeHook` compile break. Users opt in via config until validated. |
-| **The observe → memory feedback loop** | `add-behavioral-observability-to-memory` | The piece that most directly serves the north star: turning "agents reliably get lost in module X" into a durable memory/orient signal that helps the *next* agent before it starts. |
+| **`experimental_blocking` mode** | `defer-panic-blocking-enforcement` | BUILT — opt-in only; ladder is `off\|observe\|advisory\|experimental_blocking`. At L4 emits `{decision:block, advisory:true}`; never default. Hard-gated on the accuracy gate. |
+| **Gryph integration** (`gryph-bridge`, `gryph-watch`, CAS) | `defer-gryph-runtime-observability` | BUILT — fail-open (no-op when the `gryph` binary is absent); `gryph-watch` exits silently on `off`. |
+| **`setup --hooks` / `--panic` installers** | `defer-panic-setup-hooks` | BUILT — opt-in flags; never installed by a default `setup`. Enabling an interventional mode prints an accuracy-validation warning. |
+| **observe → memory feedback loop** | `add-behavioral-observability-to-memory` | BUILT (substrate) — `openlore panic-hotspots` aggregates per-module destabilization and `--write` persists `behavioral-hotspots.json`. Wiring `orient()` to consume it is the one remaining small follow-up. |
+
+The expanded **observe-mode validation gate** (`openlore panic-validate`) also landed here — per-trigger
+false-positive attribution, peak-level histogram, follow-through, and a `REVIEW_REQUIRED` /
+`INSUFFICIENT_DATA` verdict that is never auto-`CLEARED`.
 
 ## The validation gate (the constraint that governs everything above)
 

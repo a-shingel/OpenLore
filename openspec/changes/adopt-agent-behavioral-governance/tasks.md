@@ -46,24 +46,25 @@
 - [x] No new tool enters the default/minimal MCP surface (panic-check/panic-level are CLI commands, not
       MCP tools; no MCP tool added).
 
-## Scope trim applied (Gryph / blocking / hooks deferred)
-- [x] Removed `gryph-bridge.ts`, `gryph-watch.ts`, and their tests (external `safedep/gryph` binary +
-      background daemon + CAS multi-writer) — deferred to its own change.
-- [x] Removed `experimental_blocking` from the mode ladder (interventional enforcement) — deferred until
-      observe-mode accuracy is validated.
-- [x] Left inert plumbing in place for the deferred Gryph PR (`gryphWindowStart`, `revision`/CAS,
-      `GRYPH_*` constants) — dormant, no build/behavior impact.
+## 5. Full feature built in this PR (was deferred; now opt-in + off by default)
+- [x] **Expanded observe-mode validation gate** — `openlore panic-validate` (+ `--json`):
+      per-trigger false-positive attribution, peak-level histogram, intervention follow-through,
+      pass/fail criteria, actionable recommendations; verdict `INSUFFICIENT_DATA`/`REVIEW_REQUIRED`,
+      never auto-`CLEARED`. Also fixed the `call_triggers` bug (telemetry "triggers" was always empty).
+- [x] **`experimental_blocking`** — back on the ladder as an EXPLICIT opt-in (never default); L4 emits
+      `{decision:block, advisory:true}`. Below L4 == advisory.
+- [x] **Gryph** (`gryph-bridge.ts`, `gryph-watch.ts`, CAS) — re-attached fail-open (no-op when the
+      `gryph` binary is absent); `gryph-watch` exits silently on `off`. CAS/`gryphWindowStart`/`GRYPH_*`
+      plumbing now live.
+- [x] **`setup --hooks` / `--panic`** — opt-in installers; never installed by a default `setup`;
+      reconciled with `--global`; no `installClaudeHook` dependency; interventional modes warn to validate.
+- [x] **observe → memory feedback loop** — `openlore panic-hotspots` (+ `--write`): per-module
+      destabilization hotspots with labeled signals, persisted to `behavioral-hotspots.json`.
 
-## 5. Deferred — follow-up PRs (NOT this PR)
-- [ ] **Validate accuracy (the gate).** This PR lands the machinery green but does NOT prove the panic
-      signal is accurate. Before any interventional posture ships on by default, `observe`-mode telemetry
-      from real sessions must show: (a) a false-positive rate low enough that acting is net-positive
-      (focused deep work must not trip L2+), (b) `panic_intervention_outcome` trending positive
-      (orient-after-intervention, not ignored/fought), (c) episodes resolve rather than oscillate.
-      Everything below is blocked on this gate.
-- [ ] **`experimental_blocking`** mode — only after accuracy is shown.
-- [ ] **Gryph** (`gryph-bridge.ts`, `gryph-watch.ts`, daemon, PID file, CAS, external binary) — evaluated
-      on its own merits as a separate change.
-- [ ] **Auto-installed hooks** via `setup --hooks` — after the core is validated.
-- [ ] **observe → memory feedback loop** — turn behavioral observability into a durable memory/orient
-      signal (the north-star payoff). Its own change proposal.
+## 6. Still gated / remaining
+- [ ] **Validate accuracy (the gate).** The machinery is built but does NOT prove the signal is accurate.
+      No interventional posture ships **enabled-by-default** until `observe`-mode telemetry shows: (a) a
+      low false-positive rate (focused deep work must not trip L2+), (b) `panic_intervention_outcome`
+      trending positive, (c) episodes resolve rather than oscillate. Measure with `openlore panic-validate`.
+- [ ] **Wire `orient()` to consume `behavioral-hotspots.json`** — the last small step of the observe→memory
+      loop. Left separate to keep `orient`'s blast radius out of this PR.

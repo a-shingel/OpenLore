@@ -1,5 +1,9 @@
 # Panic setup hooks — `setup --hooks` / `--panic` (deferred follow-up from PR #83)
 
+> **UPDATE (2026-06-21): BUILT in PR #175** — `setup --hooks` / `--panic` are implemented as opt-in
+> flags (never installed by a default `setup`; reconciled with `--global`, no `installClaudeHook`
+> dependency). History below.
+>
 > Status: DEFERRED — the `setup` wiring was left as upstream `main` in PR #175 (zero-conflict,
 > zero-risk). Preserves @laurentftech's hook-installer design (PR #83). Build after the core is
 > validated and (for the gryph-watch hook) after Gryph lands.

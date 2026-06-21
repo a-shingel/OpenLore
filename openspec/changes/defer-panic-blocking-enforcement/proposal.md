@@ -1,5 +1,9 @@
 # Panic blocking enforcement — `experimental_blocking` mode (deferred follow-up from PR #83)
 
+> **UPDATE (2026-06-21): BUILT in PR #175** — `experimental_blocking` is back on the ladder as an
+> EXPLICIT opt-in (never default); at L4 it emits `{decision:block, advisory:true}`. Still hard-gated
+> on the accuracy gate before any default-on use. History below.
+>
 > Status: DEFERRED — removed from the mode ladder in PR #175 (now `off | observe | advisory`).
 > Preserves @laurentftech's L4 enforcement design (PR #83). HARD-gated on validated signal accuracy.
 
