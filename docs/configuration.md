@@ -38,3 +38,27 @@
 | `DEBUG` | -- | Enable stack traces on errors |
 | `CI` | -- | Auto-detected; enables timestamps in output |
 
+### Spec-store binding
+
+An optional `specStore` block in `.openlore/config.json` binds this repository to an external **spec store** — a standalone repository that holds specs/changes — and declares the code repositories its plans are about. It is configuration only: OpenLore reads the declared relationships and never clones, writes to, syncs, or fences the store or any target. Omit the block entirely for unchanged single-repository behavior.
+
+```json
+{
+  "specStore": {
+    "name": "team-plans",
+    "path": "../team-plans",
+    "targets": ["api", "web"],
+    "references": ["design-system"]
+  }
+}
+```
+
+| Field | Required | Meaning |
+|-------|:---:|---------|
+| `name` | yes | a stable, user-facing name for the store |
+| `path` | yes | absolute or repo-relative path to the external spec repository |
+| `targets` | yes | federation-registered names of the code repositories the store's work is *about* |
+| `references` | no | federation-registered names of repositories the store draws on for *context* |
+
+`targets` and `references` are **names**, not paths: each must match a repository registered with `openlore federation add … --name <name>` (see [Federation](federation.md)). Check the binding's health with `openlore spec-store status` ([CLI reference](cli-reference.md#spec-store-binding)); it reports per-target resolution, index freshness, reference presence, and store-path presence as findings with stable codes, and never blocks.
+

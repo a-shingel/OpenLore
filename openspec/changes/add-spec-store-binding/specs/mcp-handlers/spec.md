@@ -47,8 +47,9 @@ The system SHALL provide a deterministic, read-only, conclusion-shaped health ch
 binding that reports, per declared target, whether it resolves, whether its index is present, and
 whether its index is fresh relative to its working tree; per declared reference, whether it is present;
 and any dangling declared names. Each finding SHALL carry a stable code and a pasteable remediation. The
-check SHALL NOT block and SHALL degrade infrastructure failures (no federation, not a repository) to a
-typed finding rather than throwing. The check SHALL compose existing analyses only, with no LLM.
+check SHALL NOT block and SHALL degrade infrastructure failures (no federation, not a repository, a
+corrupt federation registry) to a typed finding rather than throwing — on every surface, including the
+MCP dispatch path, not only the CLI. The check SHALL compose existing analyses only, with no LLM.
 
 #### Scenario: A healthy binding reports no findings
 
@@ -63,3 +64,10 @@ typed finding rather than throwing. The check SHALL compose existing analyses on
 - **WHEN** the health check runs
 - **THEN** it returns exactly one finding with the stable code `index-stale` and a remediation, and does
   not block
+
+#### Scenario: A corrupt federation registry degrades to a finding, never a throw
+
+- **GIVEN** a configured binding and a corrupt or malformed `.openlore/federation.json`
+- **WHEN** the health check runs (including via the MCP dispatch path)
+- **THEN** it returns a report carrying a `registry-unreadable` finding rather than throwing, and does
+  not emit a misleading `target-unresolved` finding for each declared target

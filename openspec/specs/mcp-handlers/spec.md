@@ -779,11 +779,12 @@ The system SHALL provide a deterministic, read-only, conclusion-shaped health ch
 binding that reports, per declared target, whether it resolves, whether its index is present, and
 whether its index is fresh relative to its working tree; per declared reference, whether it is present;
 the presence of the store's own path; and any malformed-binding problems. Each finding SHALL carry a
-stable code (`no-binding`, `binding-invalid`, `store-path-missing`, `target-unresolved`,
-`target-missing`, `index-missing`, `index-stale`, `reference-missing`) and a pasteable remediation. The
-check SHALL NOT block, SHALL be sound when it carries no error-severity finding, and SHALL degrade
-infrastructure failures to a finding rather than throwing. The check SHALL compose existing analyses
-only, with no LLM.
+stable code (`no-binding`, `binding-invalid`, `registry-unreadable`, `store-path-missing`,
+`target-unresolved`, `target-missing`, `index-missing`, `index-stale`, `reference-missing`) and a
+pasteable remediation. The check SHALL NOT block, SHALL be sound when it carries no error-severity
+finding, and SHALL degrade infrastructure failures (no federation, not a repository, **a corrupt
+federation registry**) to a finding rather than throwing — on every surface, including the MCP dispatch
+path, not only the CLI. The check SHALL compose existing analyses only, with no LLM.
 
 #### Scenario: A healthy binding reports no findings
 
@@ -798,6 +799,13 @@ only, with no LLM.
 - **WHEN** the health check runs
 - **THEN** it returns exactly one finding with the stable code `index-stale` and a remediation, and does
   not block
+
+#### Scenario: A corrupt federation registry degrades to a finding, never a throw
+
+- **GIVEN** a configured binding and a corrupt or malformed `.openlore/federation.json`
+- **WHEN** the health check runs (including via the MCP dispatch path)
+- **THEN** it returns a report carrying a `registry-unreadable` finding rather than throwing, and it does
+  not emit a misleading `target-unresolved` finding for each declared target
 
 ### Spec-store binding resolves declared targets by name against the federation registry
 

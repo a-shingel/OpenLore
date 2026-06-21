@@ -97,10 +97,19 @@ and `openspec/specs/cli/spec.md` (SpecStoreStatusCommand).
   returns findings, never throws. Targets/references resolve **by name** against
   `.openlore/federation.json`. The report is conclusion-shaped (counts + named findings), never a graph.
 - **Stable finding codes** (the `--json` contract): `no-binding` (info), `binding-invalid` (error —
-  empty name/path, self-referential store path, duplicate names), `store-path-missing` (error),
-  `target-unresolved` (error), `target-missing` (error), `index-missing` (warn), `index-stale` (warn),
-  `reference-missing` (warn). `sound` is true when there are no error-severity findings. References are
-  checked for presence only (they are context, not impact targets); targets carry index freshness.
+  empty name/path, self-referential store path, duplicate names, **a name listed as both a target and a
+  reference**), `registry-unreadable` (error — corrupt `.openlore/federation.json`),
+  `store-path-missing` (error), `target-unresolved` (error), `target-missing` (error), `index-missing`
+  (warn), `index-stale` (warn), `reference-missing` (warn). `sound` is true when there are no
+  error-severity findings. References are checked for presence only (they are context, not impact
+  targets); targets carry index freshness.
+- **Adversarial hardening (post-review, same PR).** A corrupt federation registry made
+  `handleSpecStoreStatus` throw on the MCP dispatch path (the CLI caught it, the tool did not) — fixed
+  by catching `loadRegistry` and degrading to `registry-unreadable` with no per-target cascade. A
+  relative store path was resolved against `process.cwd()` in the self-reference check but against the
+  bound repo in the presence check — unified to the bound repo. The report now echoes the trimmed store
+  name/path it actually validated. Regression tests cover all of these, including a `dispatchTool`
+  route test (the surface the throw escaped through).
 - **MCP tool**: `spec_store_status` — classified `conclusion` in `tool-contract.ts`; registered in
   `tool-dispatch.ts`, `TOOL_DEFINITIONS` (`mcp.ts`), and the live `tool-driver.ts` registry. Added to
   the opt-in `federation` preset (it resolves against the same registry, like `federation_status`);

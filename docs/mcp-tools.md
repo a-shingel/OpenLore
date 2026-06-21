@@ -207,8 +207,25 @@ Registered only under `openlore mcp --preset federation`. Federation is an index
 | Tool | Description | Requires prior analysis |
 |------|-------------|:---:|
 | `federation_status` | Report the federation registry and each registered repo's live index state (`indexed` / `stale` / `unindexed` / `missing`), with registered-vs-live fingerprints. Read-only. | No |
+| `spec_store_status` | Report the health of a spec-store binding (`.openlore/config.json` `specStore`): per-target resolution + live index state, reference presence, and store-path presence. Declared target/reference **names** resolve against the federation registry. Read-only; never throws, never blocks. | No |
 
 When a registry exists, `analyze_impact`, `find_dead_code`, `select_tests`, and `find_path` accept opt-in `federation` (boolean) and `federationRepos` (name list) params: cross-repo consumers, live-via-federation exports, cross-repo test selection, and cross-repo producer/bridge location respectively. Each response names `reposConsulted` / `reposSkipped` — unindexed/stale repos are reported, never guessed.
+
+A **spec-store binding** declares the code repositories an external spec repository targets/references; `spec_store_status` reports its health as a conclusion-shaped report whose `findings[]` carry stable codes (the `--json` agent contract):
+
+| Code | Severity | Meaning |
+|------|:---:|---------|
+| `no-binding` | info | no `specStore` block configured (single-repo behavior unchanged) |
+| `binding-invalid` | error | malformed block: empty name/path, self-referential store path, a duplicate name, or a name in both `targets` and `references` |
+| `registry-unreadable` | error | `.openlore/federation.json` is present but corrupt/unparseable |
+| `store-path-missing` | error | the store's declared `path` does not exist on disk |
+| `target-unresolved` | error | a declared target name is not registered in the federation registry |
+| `target-missing` | error | a resolved target's registered path no longer exists |
+| `index-missing` | warn | a resolved target has no built `.openlore` index |
+| `index-stale` | warn | a resolved target's index is stale vs its working tree |
+| `reference-missing` | warn | a declared reference is unresolved or its path is gone |
+
+The report is `sound` when it carries no error-severity finding. Every finding includes a pasteable `remediation`. Exposed only under `openlore mcp --preset federation`.
 
 **Story Management**
 

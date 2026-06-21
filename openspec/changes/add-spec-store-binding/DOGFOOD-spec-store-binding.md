@@ -86,3 +86,29 @@ orchestrator without scraping prose.
   budget, `mcp-tool-count-doc` 60→61).
 - `spec_store_status` is exposed in the full surface and the opt-in `federation` preset; absent from
   `minimal`/`navigation`/`memory`.
+
+## Adversarial hardening pass (2026-06-21, same PR)
+
+Two independent adversarial reviews plus a hostile-input e2e battery against the built binary. Three
+real defects found and fixed; documentation brought to parity with `federation_status`.
+
+| # | Adversarial input | Before | After (built binary) |
+|---|-------------------|--------|----------------------|
+| A | Corrupt `.openlore/federation.json` + a binding | **MCP dispatch THREW** (`isError`), violating the no-throw contract; CLI caught it | `registry-unreadable` finding on **both** CLI and MCP paths; no per-target cascade |
+| B | Wrong-shape manifest (`{"repos":"not-an-array"}`) | threw | `registry-unreadable` |
+| C | A name in both `targets` and `references` | double-resolved with contradictory severities | one `binding-invalid` (cross-listed) |
+| D | Self-referential **relative** store path `"."` (MCP `directory` ≠ cwd) | self-ref check resolved against `process.cwd()`, missed it | resolved against the bound repo; `binding-invalid` (itself) |
+| E | Whitespace-padded `name`/`path` | echoed raw, disagreed with validated values | report echoes trimmed values |
+| F | `openlore spec-store` (no subcommand) | — | prints help, exits 0, no crash |
+
+Root cause of the P1: `handleSpecStoreStatus` called `listRepos` → `loadRegistry`, which deliberately
+throws on a corrupt manifest; only the CLI wrapped it. Fix: the handler catches it and degrades to a
+`registry-unreadable` finding (new code), suppressing the misleading per-target `target-unresolved`
+cascade. Regression tests cover A–E plus a `dispatchTool('spec_store_status', …)` route test (the exact
+surface the throw escaped through).
+
+- Full suite after fixes: **4304 pass, 2 skip** (211 files); `eslint src` clean; build clean.
+- Docs brought to parity: `spec_store_status` + the full finding-code table added to `docs/mcp-tools.md`;
+  `openlore spec-store status` added to `docs/cli-reference.md`; the `specStore` block documented in
+  `docs/configuration.md`; a spec-store binding subsection added to `docs/federation.md`. Tool count
+  unchanged (61 — no new tool this pass).

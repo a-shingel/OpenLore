@@ -25,7 +25,8 @@ import type { FederationRepoEntry, RepoIndexState } from '../../federation/types
 /** Stable finding codes — part of the agent-facing `--json` contract. */
 export type SpecStoreFindingCode =
   | 'no-binding'          // no spec-store binding is configured (info)
-  | 'binding-invalid'     // the binding block is malformed (duplicate/empty/self-referential)
+  | 'binding-invalid'     // the binding block is malformed (duplicate/empty/self-referential/cross-listed)
+  | 'registry-unreadable' // the federation registry exists but is corrupt/unparseable
   | 'store-path-missing'  // the store's declared path does not exist on disk
   | 'target-unresolved'   // a declared target name is not in the federation registry
   | 'target-missing'      // a resolved target's registered path no longer exists
@@ -65,9 +66,15 @@ export interface SpecStoreStatusReport {
   summary: string;
 }
 
-/** Canonicalize a path for identity comparison; falls back to resolve() if absent. */
-function canonicalize(p: string): string {
-  const abs = resolve(p);
+/**
+ * Canonicalize a path for identity comparison, resolved relative to `base`
+ * (the home repo) so a RELATIVE store path is interpreted against the bound
+ * repository — not `process.cwd()`, which differs from the home repo on the MCP
+ * dispatch path where `directory` is supplied by the caller. Falls back to the
+ * resolved path when realpath fails (the path does not exist).
+ */
+function canonicalize(p: string, base: string): string {
+  const abs = resolve(base, p);
   try {
     return realpathSync(abs);
   } catch {
@@ -100,7 +107,7 @@ export function validateSpecStoreConfig(
       message: 'Binding has no path.',
       remediation: 'Set "specStore.path" to the spec repository location in .openlore/config.json.',
     });
-  } else if (canonicalize(path) === canonicalize(homeDir)) {
+  } else if (canonicalize(path, homeDir) === canonicalize(homeDir, homeDir)) {
     findings.push({
       code: 'binding-invalid', severity: 'error', subject: 'specStore.path',
       message: 'The spec store is bound to this repository itself; a store is an external repository.',
@@ -125,6 +132,19 @@ export function validateSpecStoreConfig(
       message: `Reference "${d}" is declared more than once.`,
       remediation: `Remove the duplicate "${d}" from "specStore.references".`,
     });
+  }
+  // A name cannot be both a target (the work is about it) and a reference
+  // (upstream context only). Declaring it in both is a contradiction that would
+  // otherwise be double-resolved with conflicting severities.
+  const refSet = new Set(references);
+  for (const t of new Set(targets)) {
+    if (refSet.has(t)) {
+      findings.push({
+        code: 'binding-invalid', severity: 'error', subject: t,
+        message: `"${t}" is declared as both a target and a reference.`,
+        remediation: `List "${t}" under "specStore.targets" OR "specStore.references", not both.`,
+      });
+    }
   }
   return findings;
 }
@@ -232,20 +252,39 @@ export async function handleSpecStoreStatus(directory: string): Promise<SpecStor
   const findings: SpecStoreFinding[] = [];
   findings.push(...validateSpecStoreConfig(binding, absDir));
 
-  // Store path presence.
+  const storeName = (binding.name ?? '').trim();
   const storePath = (binding.path ?? '').trim();
+
+  // Store path presence.
   if (storePath && !existsSync(resolve(absDir, storePath))) {
     findings.push({
-      code: 'store-path-missing', severity: 'error', subject: binding.name || storePath,
+      code: 'store-path-missing', severity: 'error', subject: storeName || storePath,
       message: `The spec store path does not exist: ${storePath}`,
       remediation: `Clone or check out the spec store at ${storePath}, or fix "specStore.path".`,
     });
   }
 
-  const byName = new Map<string, FederationRepoEntry>(listRepos(absDir).map(e => [e.name, e]));
+  // Load the federation registry. A corrupt/malformed `.openlore/federation.json`
+  // makes loadRegistry throw; the contract says the check degrades infrastructure
+  // failures to a finding rather than throwing, so catch it, report it as the root
+  // cause, and suppress the per-target cascade (the targets may be fine — only the
+  // registry is unreadable).
+  let byName = new Map<string, FederationRepoEntry>();
+  let registryReadable = true;
+  try {
+    byName = new Map<string, FederationRepoEntry>(listRepos(absDir).map(e => [e.name, e]));
+  } catch (err) {
+    registryReadable = false;
+    findings.push({
+      code: 'registry-unreadable', severity: 'error', subject: 'federation.json',
+      message: `The federation registry is unreadable: ${err instanceof Error ? err.message : String(err)}`,
+      remediation: 'Fix or delete .openlore/federation.json (expected shape: { "schemaVersion", "repos": [] }), then re-run.',
+    });
+  }
 
   const targets: ResolvedRepoStatus[] = [];
   for (const t of dedupePreserveOrder(Array.isArray(binding.targets) ? binding.targets : [])) {
+    if (!registryReadable) { targets.push({ name: t, resolved: false }); continue; }
     const { status, finding } = resolveTarget(t, byName);
     targets.push(status);
     if (finding) findings.push(finding);
@@ -253,6 +292,7 @@ export async function handleSpecStoreStatus(directory: string): Promise<SpecStor
 
   const references: ResolvedRepoStatus[] = [];
   for (const r of dedupePreserveOrder(Array.isArray(binding.references) ? binding.references : [])) {
+    if (!registryReadable) { references.push({ name: r, resolved: false }); continue; }
     const { status, finding } = resolveReference(r, byName);
     references.push(status);
     if (finding) findings.push(finding);
@@ -264,13 +304,13 @@ export async function handleSpecStoreStatus(directory: string): Promise<SpecStor
   const resolvedTargets = targets.filter(t => t.resolved && t.state === 'indexed').length;
 
   const summary = sound
-    ? `Binding "${binding.name}" is sound: ${resolvedTargets}/${targets.length} target(s) indexed and consultable` +
+    ? `Binding "${storeName}" is sound: ${resolvedTargets}/${targets.length} target(s) indexed and consultable` +
       (warns ? `, ${warns} warning(s)` : '') + '.'
-    : `Binding "${binding.name}" has ${errors} blocking issue(s) and ${warns} warning(s); see findings.`;
+    : `Binding "${storeName}" has ${errors} blocking issue(s) and ${warns} warning(s); see findings.`;
 
   return {
     bound: true,
-    store: { name: binding.name, path: binding.path },
+    store: { name: storeName, path: storePath },
     targets,
     references,
     findings,

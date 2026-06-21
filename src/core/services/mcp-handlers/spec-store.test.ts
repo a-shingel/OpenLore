@@ -16,7 +16,8 @@ import {
   validateSpecStoreConfig,
 } from './spec-store.js';
 import { assertConclusionShape } from './tool-contract.js';
-import { addRepo } from '../../federation/registry.js';
+import { dispatchTool } from '../tool-dispatch.js';
+import { addRepo, federationManifestPath } from '../../federation/registry.js';
 import {
   OPENLORE_DIR,
   OPENLORE_CONFIG_FILENAME,
@@ -212,5 +213,82 @@ describe('handleSpecStoreStatus', () => {
 
     const report = await handleSpecStoreStatus(home);
     expect(() => assertConclusionShape('spec_store_status', report)).not.toThrow();
+  });
+});
+
+describe('handleSpecStoreStatus — adversarial / hardening', () => {
+  // P1: the contract says infrastructure failures degrade to a finding, never throw.
+  // loadRegistry throws on a corrupt/malformed manifest; the handler must catch it.
+  it('does NOT throw on a corrupt federation.json — degrades to registry-unreadable', async () => {
+    const store = makeRepo('plans', null);
+    writeBinding({ name: 'plans', path: store, targets: ['api'] });
+    mkdirSync(join(home, OPENLORE_DIR), { recursive: true });
+    writeFileSync(federationManifestPath(home), '{ not valid json');
+
+    let report: Awaited<ReturnType<typeof handleSpecStoreStatus>> | undefined;
+    await expect((async () => { report = await handleSpecStoreStatus(home); })()).resolves.toBeUndefined();
+    expect(report!.findings.some(f => f.code === 'registry-unreadable')).toBe(true);
+    expect(report!.sound).toBe(false);
+    // No misleading per-target cascade when the registry itself is the problem.
+    expect(report!.findings.filter(f => f.code === 'target-unresolved')).toHaveLength(0);
+    expect(report!.targets[0]).toMatchObject({ name: 'api', resolved: false });
+    expect(() => assertConclusionShape('spec_store_status', report)).not.toThrow();
+  });
+
+  it('does NOT throw on a wrong-shape federation.json — degrades to registry-unreadable', async () => {
+    const store = makeRepo('plans', null);
+    writeBinding({ name: 'plans', path: store, targets: ['api'] });
+    mkdirSync(join(home, OPENLORE_DIR), { recursive: true });
+    writeFileSync(federationManifestPath(home), JSON.stringify({ repos: 'not-an-array' }));
+
+    const report = await handleSpecStoreStatus(home);
+    expect(report.findings.some(f => f.code === 'registry-unreadable')).toBe(true);
+  });
+
+  // P2a: a RELATIVE store path must resolve against the home repo, not process.cwd().
+  it('detects a self-referential RELATIVE store path against the home dir, not cwd', () => {
+    const findings = validateSpecStoreConfig(
+      { name: 'plans', path: '.', targets: ['api'] },
+      home,
+    );
+    expect(findings.some(f => f.code === 'binding-invalid' && /itself/i.test(f.message))).toBe(true);
+  });
+
+  // P2b: a name cannot be both a target and a reference.
+  it('flags a name declared as both a target and a reference', async () => {
+    const api = makeRepo('api', 'hash-api');
+    addRepo(home, api, { name: 'api' });
+    const store = makeRepo('plans', null);
+    writeBinding({ name: 'plans', path: store, targets: ['api'], references: ['api'] });
+
+    const report = await handleSpecStoreStatus(home);
+    const crossListed = report.findings.filter(
+      f => f.code === 'binding-invalid' && /both a target and a reference/i.test(f.message),
+    );
+    expect(crossListed).toHaveLength(1);
+    expect(report.sound).toBe(false);
+  });
+
+  // P3: the echoed store name/path must match the trimmed values the checks used.
+  it('echoes trimmed store name and path in the report', async () => {
+    const store = makeRepo('plans', null);
+    writeBinding({ name: '  plans  ', path: `  ${store}  `, targets: [] });
+
+    const report = await handleSpecStoreStatus(home);
+    expect(report.store?.name).toBe('plans');
+    expect(report.store?.path).toBe(store);
+  });
+
+  // The MCP dispatch route is where the P1 throw actually escaped to an isError
+  // result; dispatchTool must RESOLVE (not reject) with a corrupt registry.
+  it('dispatchTool(spec_store_status) resolves to a report on a corrupt registry (no throw to the MCP layer)', async () => {
+    const store = makeRepo('plans', null);
+    writeBinding({ name: 'plans', path: store, targets: ['api'] });
+    mkdirSync(join(home, OPENLORE_DIR), { recursive: true });
+    writeFileSync(federationManifestPath(home), '{ not valid json');
+
+    const result = await dispatchTool('spec_store_status', { directory: home }, home) as { bound: boolean; findings: Array<{ code: string }> };
+    expect(result.bound).toBe(true);
+    expect(result.findings.some(f => f.code === 'registry-unreadable')).toBe(true);
   });
 });
