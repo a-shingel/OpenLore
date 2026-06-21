@@ -22,6 +22,7 @@
 | `openlore federation add\|remove\|list` | Manage the multi-repo federation registry (index-of-indexes) | No |
 | `openlore spec-store status` | Report the health of the spec-store binding (read-only, advisory) | No |
 | `openlore working-set context` | Assemble the working-set briefing for an active change across its targets (read-only, advisory) | Targets indexed |
+| `openlore impact-certificate` | Certify what the current diff opens into declared covering surfaces, before it lands (advisory; opt-in blocking) | Yes |
 | `openlore mcp` | Start MCP server (stdio, for Cline / Claude Code) | No |
 | `openlore serve` | Start a warm local HTTP daemon exposing tools (loopback, for Pi / editors) | No |
 | `openlore doctor` | Check environment and configuration for common issues | No |
@@ -227,6 +228,19 @@ openlore working-set context --change <id> --token-budget 4000   # cap the merge
 ```
 
 It reads the change's proposal under the bound store, orients each resolved+indexed target on that intent, and returns one budgeted, per-target-attributed briefing plus fresh in-scope anchored intent (orphaned withheld, drifted flagged). Read-only and advisory — always exits 0, never blocks. Findings carry stable codes (`change-not-found`, `target-not-briefable`, `no-briefable-targets`, …). The matching MCP tool `working_set_context` is exposed under `openlore mcp --preset federation`.
+
+#### Change impact certificate
+
+Certify what the current diff touches — and, crucially, what it *newly reaches* — before it lands. You declare **covering surfaces** (semantic/governance boundaries) under `impactCertificate.surfaces` in `.openlore/config.json`; the certificate reports the paths the change opens into each surface (reachable after the diff but not before), plus blast radius, drifted specs, and tests to run:
+
+```bash
+openlore impact-certificate                       # human-readable certificate for the working tree vs HEAD
+openlore impact-certificate --base main --json    # documented JSON (stable surface + path codes) for an orchestrator
+openlore impact-certificate --change <id> --save  # record the change id + persist for later decay re-checks
+openlore impact-certificate --install-hook        # install the ADVISORY pre-commit hook (never blocks by default)
+```
+
+Advisory by default — it emits the certificate and exits 0; an infrastructure failure (no index, not a repo) never blocks. A repository MAY opt into blocking specific surface severities with `impactCertificate.block: ["critical"]`, in which case the `--hook` exits non-zero only when the diff opens a new path into a surface of that severity. Newly-opened-path detection is differential and deterministic (no LLM): only the changed files are re-parsed, renamed files read their base-ref content, untracked files are folded in, and an ambiguous added callee is reported, never guessed. The certificate decays via the freshness lease — when an anchored symbol later moves, `openlore spec-store status` re-fires it as a `certificate-stale` finding. The matching MCP tool `change_impact_certificate` is exposed under `openlore mcp --preset federation`.
 
 ---
 

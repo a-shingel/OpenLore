@@ -161,12 +161,22 @@ function indexByName(nodes: readonly FunctionNode[]): Map<string, string[]> {
  * graph. A `symbol` member resolves only when it matches exactly one internal node
  * (no guessing); a `file` member contributes all internal nodes in that file. An
  * unresolved member degrades to a finding — it never throws (mcp-handlers contract).
+ *
+ * `postNodes` (the post-change snapshot's internal nodes) is merged in so a surface
+ * member that was ADDED in this same diff — and so is absent from the canonical
+ * graph — still resolves, instead of being silently missed (a false "no new reach").
  */
 export function resolveSurfaces(
   surfaces: readonly CoveringSurfaceConfig[],
   cg: SerializedCallGraph,
+  postNodes: readonly FunctionNode[] = [],
 ): { resolved: Array<{ name: string; severity: CoveringSurfaceSeverity; ids: Set<string> }>; views: ResolvedSurfaceView[]; findings: ImpactCertificateFinding[] } {
-  const internal = cg.nodes.filter(n => !n.isExternal);
+  // Merge canonical + post-change nodes, de-duped by id (a changed-file symbol has
+  // the same path-based id in both, so the canonical entry wins harmlessly).
+  const mergedById = new Map<string, FunctionNode>();
+  for (const n of cg.nodes) if (!n.isExternal) mergedById.set(n.id, n);
+  for (const n of postNodes) if (!n.isExternal && !mergedById.has(n.id)) mergedById.set(n.id, n);
+  const internal = [...mergedById.values()];
   const byName = indexByName(internal);
   const nodesByFile = new Map<string, string[]>();
   for (const n of internal) (nodesByFile.get(n.filePath) ?? nodesByFile.set(n.filePath, []).get(n.filePath)!).push(n.id);
@@ -290,17 +300,26 @@ async function buildSnapshot(files: InFile[]): Promise<SerializedCallGraph | nul
 }
 
 /**
- * Per changed-file caller node id, the set of callee NAMES it called in a snapshot.
- * Keyed by the path-based node id so callers pair across the old/new snapshots.
+ * Per changed-file caller node id, the set of callee TARGET KEYS it called in a
+ * snapshot. A key is either `id:<calleeId>` when the snapshot resolved the call to a
+ * function defined WITHIN the changed-file set (a same-snapshot, path-based id that
+ * lines up with canonical ids), or `name:<calleeName>` when the callee is external to
+ * the snapshot (a cross-file call into an unchanged file, resolved later by name).
+ *
+ * Keying internal calls by their resolved id — not by name — is what stops a local
+ * helper that happens to SHARE a surface symbol's name from being mis-resolved to the
+ * canonical surface (a phantom opening). The snapshot already bound the call to the
+ * local definition; we honor that binding instead of re-resolving by name.
  */
-function calleeNamesByCaller(snap: SerializedCallGraph | null): Map<string, Set<string>> {
+function calleeKeysByCaller(snap: SerializedCallGraph | null): Map<string, Set<string>> {
   const out = new Map<string, Set<string>>();
   if (!snap) return out;
   const internalIds = new Set(snap.nodes.filter(n => !n.isExternal).map(n => n.id));
   for (const e of snap.edges) {
     if (!isCallEdge(e)) continue;
     if (!internalIds.has(e.callerId)) continue;
-    (out.get(e.callerId) ?? out.set(e.callerId, new Set()).get(e.callerId)!).add(e.calleeName);
+    const key = internalIds.has(e.calleeId!) ? `id:${e.calleeId}` : `name:${e.calleeName}`;
+    (out.get(e.callerId) ?? out.set(e.callerId, new Set()).get(e.callerId)!).add(key);
   }
   return out;
 }
@@ -312,6 +331,11 @@ interface EdgeDelta {
   removed: Array<{ from: string; to: string }>;
   /** Added call names that did not resolve to exactly one symbol (honest limit). */
   unresolved: Array<{ caller: string; name: string }>;
+  /** Internal nodes of the post-change snapshot — lets a surface member that was
+   *  ADDED in this same diff (absent from the canonical graph) still resolve.
+   *  Optional: the pure detection core does not require it (it takes post nodes
+   *  as a separate argument); `computeEdgeDelta` always populates it. */
+  postNodes?: FunctionNode[];
 }
 
 /** A changed file with its git status + (for renames) the path it lived at in the base ref. */
@@ -364,21 +388,23 @@ export async function computeEdgeDelta(
   const oldSnap = await buildSnapshot(oldFiles);
   const newSnap = await buildSnapshot(newFiles);
 
-  // Name → canonical id, preferring the canonical graph so resolved ids line up
-  // with the canonical adjacency and surface ids. Newly-added functions (only in
-  // the new snapshot) resolve to their snapshot id, which we splice in as callers.
-  const byName = indexByName(cg.nodes);
-  const newByName = newSnap ? indexByName(newSnap.nodes) : new Map<string, string[]>();
-  const resolveName = (name: string): string | null => {
-    const c = byName.get(name);
-    if (c && c.length === 1) return c[0];
-    const n = newByName.get(name);
-    if (n && n.length === 1) return n[0];
-    return null;
-  };
+  const postNodes = newSnap ? newSnap.nodes.filter(n => !n.isExternal) : [];
 
-  const oldByCaller = calleeNamesByCaller(oldSnap);
-  const newByCaller = calleeNamesByCaller(newSnap);
+  // A `name:` target key (a call into an UNCHANGED file) resolves against the
+  // canonical graph by unique name; an `id:` key already carries its resolved
+  // (snapshot-internal, canonical-compatible) node id. Ambiguous canonical names
+  // are reported, never guessed.
+  const byName = indexByName(cg.nodes);
+  const resolveKey = (key: string): string | null => {
+    if (key.startsWith('id:')) return key.slice(3);
+    const name = key.slice(5); // strip 'name:'
+    const c = byName.get(name);
+    return c && c.length === 1 ? c[0] : null;
+  };
+  const nameOfKey = (key: string): string => key.startsWith('id:') ? key.slice(3) : key.slice(5);
+
+  const oldByCaller = calleeKeysByCaller(oldSnap);
+  const newByCaller = calleeKeysByCaller(newSnap);
   const callers = new Set<string>([...oldByCaller.keys(), ...newByCaller.keys()]);
 
   const added: Array<{ from: string; to: string }> = [];
@@ -388,26 +414,26 @@ export async function computeEdgeDelta(
   const seenRemoved = new Set<string>();
 
   for (const caller of callers) {
-    const oldNames = oldByCaller.get(caller) ?? new Set<string>();
-    const newNames = newByCaller.get(caller) ?? new Set<string>();
-    for (const name of newNames) {
-      if (oldNames.has(name)) continue; // unchanged call
-      const to = resolveName(name);
-      if (!to) { unresolved.push({ caller, name }); continue; }
+    const oldKeys = oldByCaller.get(caller) ?? new Set<string>();
+    const newKeys = newByCaller.get(caller) ?? new Set<string>();
+    for (const k of newKeys) {
+      if (oldKeys.has(k)) continue; // unchanged call
+      const to = resolveKey(k);
+      if (!to) { unresolved.push({ caller, name: nameOfKey(k) }); continue; }
       if (to === caller) continue; // ignore self-edges for reachability
-      const key = `${caller} ${to}`;
+      const key = `${caller}\u0000${to}`;
       if (!seenAdded.has(key)) { seenAdded.add(key); added.push({ from: caller, to }); }
     }
-    for (const name of oldNames) {
-      if (newNames.has(name)) continue;
-      const to = resolveName(name);
+    for (const k of oldKeys) {
+      if (newKeys.has(k)) continue;
+      const to = resolveKey(k);
       if (!to) continue;
       if (to === caller) continue;
-      const key = `${caller} ${to}`;
+      const key = `${caller}\u0000${to}`;
       if (!seenRemoved.has(key)) { seenRemoved.add(key); removed.push({ from: caller, to }); }
     }
   }
-  return { added, removed, unresolved };
+  return { added, removed, unresolved, postNodes };
 }
 
 // ── differential reachability ─────────────────────────────────────────────────
@@ -486,6 +512,7 @@ export function detectNewlyOpenedPaths(
   cg: SerializedCallGraph,
   surfaces: ReadonlyArray<{ name: string; severity: CoveringSurfaceSeverity; ids: Set<string> }>,
   delta: EdgeDelta,
+  postNodes: readonly FunctionNode[] = [],
 ): NewlyOpenedPath[] {
   if (delta.added.length === 0) return [];
   const base = forwardAdjacency(cg);
@@ -493,9 +520,11 @@ export function detectNewlyOpenedPaths(
   const preFwd = applyDelta(base, delta.removed, delta.added); // mirror: pre = base − added + removed
   const postRev = reverse(postFwd);
   const preRev = reverse(preFwd);
-  // A newly-added caller is not in the indexed graph yet, so fall back to the bare
-  // symbol name parsed from its path-based id (`file::name`) rather than the raw id.
+  // A newly-added caller/callee is not in the indexed graph yet — name it from the
+  // post-change snapshot when available, else from the bare name parsed off its
+  // path-based id (`file::name`) rather than echoing the raw id.
   const nameById = new Map(cg.nodes.map(n => [n.id, n.name] as const));
+  for (const n of postNodes) if (!nameById.has(n.id)) nameById.set(n.id, n.name);
   const nameOf = (id: string): string => nameById.get(id) ?? id.split('::').pop() ?? id;
 
   const out: NewlyOpenedPath[] = [];
@@ -511,7 +540,7 @@ export function detectNewlyOpenedPaths(
       const calleeReaches = surface.ids.has(edge.to) || reachPost.has(edge.to);
       const callerCouldNot = !reachPre.has(edge.from) && !surface.ids.has(edge.from);
       if (!calleeReaches || !callerCouldNot) continue;
-      const key = `${edge.from} ${edge.to}`;
+      const key = `${edge.from}\u0000${edge.to}`;
       if (seenEdge.has(key)) continue;
       seenEdge.add(key);
       const tail = shortestForwardPath(edge.to, surface.ids, postFwd);
@@ -678,18 +707,17 @@ export async function computeImpactCertificate(
   const baseRef = input.baseRef && input.baseRef.length > 0 ? input.baseRef : 'HEAD';
   const change = input.change && input.change.trim() ? input.change.trim() : 'working-tree';
 
-  // ── 1. Declared surfaces (additive; absent = nothing to assess against) ──────
+  // ── 1. Declared surfaces config (additive; absent = nothing to assess against) ─
   let surfaceCfg: CoveringSurfaceConfig[] = [];
   try {
     const cfg = await readOpenLoreConfig(absDir);
     surfaceCfg = surfacesFromConfig(cfg?.impactCertificate);
   } catch { surfaceCfg = []; }
-  const { resolved: surfaces, views: surfaceViews, findings: surfaceFindings } = resolveSurfaces(surfaceCfg, cg);
 
   // ── 2. Blast radius / tests / drift (reuse blast_radius verbatim) ────────────
   const blast = await computeBlastRadius({ directory: absDir, baseRef });
 
-  // ── 3. Changed files → edge delta → newly-opened paths (the differential) ────
+  // ── 3. Changed files → edge delta (the differential's authoritative input) ───
   let changedEntries: ChangedFileEntry[] = [];
   let resolvedBaseRef = baseRef;
   let diffError: string | null = null;
@@ -703,14 +731,24 @@ export async function computeImpactCertificate(
   // anchors and the headline count. The differential reads from `changedEntries`.
   const changedFiles = changedEntries.map(c => c.path);
 
+  // Compute the delta first so its post-change nodes can resolve a surface member
+  // that was ADDED in this same diff (else such a member silently misses).
+  let delta: EdgeDelta | null = null;
+  if (!diffError && changedEntries.length > 0 && surfaceCfg.length > 0) {
+    try { delta = await computeEdgeDelta(absDir, resolvedBaseRef, changedEntries, cg); }
+    catch { delta = null; }
+  }
+
+  // ── 4. Resolve surfaces over canonical ∪ post-change nodes, then detect ──────
+  const { resolved: surfaces, views: surfaceViews, findings: surfaceFindings } =
+    resolveSurfaces(surfaceCfg, cg, delta?.postNodes ?? []);
+
   let newlyOpenedPaths: NewlyOpenedPath[] = [];
   let unresolvedAdded: EdgeDelta['unresolved'] = [];
-  if (!diffError && changedEntries.length > 0 && surfaces.some(s => s.ids.size > 0)) {
-    try {
-      const delta = await computeEdgeDelta(absDir, resolvedBaseRef, changedEntries, cg);
-      unresolvedAdded = delta.unresolved;
-      newlyOpenedPaths = detectNewlyOpenedPaths(cg, surfaces, delta);
-    } catch { /* differential is best-effort; absence is reported as zero paths + caveat */ }
+  if (delta && surfaces.some(s => s.ids.size > 0)) {
+    unresolvedAdded = delta.unresolved;
+    try { newlyOpenedPaths = detectNewlyOpenedPaths(cg, surfaces, delta, delta.postNodes); }
+    catch { newlyOpenedPaths = []; }
   }
 
   // ── 4. Findings + severity + lease ───────────────────────────────────────────

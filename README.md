@@ -266,6 +266,7 @@ The full surface is 63 tools, but day-to-day work needs a handful. Reach for the
 | "I changed X — which tests should I run?" | `select_tests` — backward reachability to the reaching tests + paths (Spec 19) |
 | "What's dead / what dies if I delete X?" | `find_dead_code` — cross-language reachability, confidence-tagged candidates (Spec 20) |
 | "What's the blast radius of my whole diff before I commit?" | `blast_radius` — one advisory briefing: callers/layers, tests to run, anchored memories/decisions that will drift, stale specs (CLI `openlore blast-radius`) |
+| "Does my diff open a new path into a sensitive boundary?" | `change_impact_certificate` — differential reachability into declared covering surfaces (newly-opened paths), plus blast radius, drift, and tests; decays via the freshness lease (CLI `openlore impact-certificate`; opt-in `federation` preset) |
 | "What changed structurally / whose callers are now stale?" | `structural_diff` — graph diff, stale callers, rename flags (Spec 21) |
 | "What changes together with this / what's volatile?" | `get_change_coupling` — co-change + churn from git history (Spec 22) |
 | "May I add this import here / what breaks the architecture?" | `check_architecture` — pre-edit verdict against declared rules (Spec 23) |

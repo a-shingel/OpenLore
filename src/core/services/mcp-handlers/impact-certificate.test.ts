@@ -29,6 +29,7 @@ import { triggeredBlockSeverities } from '../../../cli/commands/impact-certifica
 import { assertConclusionShape } from './tool-contract.js';
 import { TOOL_OUTPUT_CLASS } from './tool-contract.js';
 import { handleSpecStoreStatus } from './spec-store.js';
+import { dispatchTool } from '../tool-dispatch.js';
 import { EdgeStore } from '../edge-store.js';
 import { AnchorContext } from '../../decisions/anchor-adapter.js';
 import { addRepo } from '../../federation/registry.js';
@@ -198,6 +199,19 @@ describe('contract', () => {
       findings: [], highestSurfaceSeverity: 'critical', posture: 'advisory', caveats: [], headline: 'x',
     };
     expect(() => assertConclusionShape('change_impact_certificate', cert)).not.toThrow();
+  });
+
+  it('dispatchTool(change_impact_certificate) resolves to a conclusion-shaped result (MCP path)', async () => {
+    // No analysis in this temp dir → the tool returns a conclusion-shaped {error},
+    // never rejects. Mirrors the spec-store / working-set dispatch reachability tests.
+    const dir = mkdtempSync(join(tmpdir(), 'impactcert-dispatch-'));
+    try {
+      const result = await dispatchTool('change_impact_certificate', { directory: dir }, dir);
+      expect(() => assertConclusionShape('change_impact_certificate', result)).not.toThrow();
+      expect(result).toHaveProperty('error'); // no analysis → unavailable, advisory
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -415,5 +429,40 @@ describe('changed-file plumbing (rename + untracked)', () => {
     // resolves to its snapshot id. surfaceFn resolves to the canonical surface id.
     expect(delta.added.some(e => e.to === SURFACE)).toBe(true);
     expect(detectNewlyOpenedPaths(cg, surfaces, delta).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('a LOCAL helper sharing a surface symbol name does NOT phantom-open the surface (homonym)', async () => {
+    // Canonical surface symbol `surfaceFn` lives in src/lib.ts. A changed file defines a
+    // DIFFERENT local `surfaceFn` (at base) and now ADDS a caller of it. The added call
+    // binds to the local def, so it must NOT be reported as a new path into the canonical
+    // surface — the bug was that name-based resolution mapped it to the canonical surface.
+    write('src/helpers.ts', 'function surfaceFn() { return 99; }\nexport function unused() { return 0; }\n');
+    git('add', '-A'); git('commit', '-q', '-m', 'helpers-with-local-homonym');
+    // THIS diff adds a caller of the LOCAL surfaceFn:
+    write('src/helpers.ts', 'function surfaceFn() { return 99; }\nexport function localCheck() { return surfaceFn(); }\n');
+    const entries = await collectChangedFiles(repo, 'HEAD');
+    const delta = await computeEdgeDelta(repo, 'HEAD', entries, cg);
+    // The added edge resolves to the LOCAL id, never the canonical surface.
+    expect(delta.added.some(e => e.to === SURFACE)).toBe(false);
+    expect(delta.added).toContainEqual({ from: 'src/helpers.ts::localCheck', to: 'src/helpers.ts::surfaceFn' });
+    expect(detectNewlyOpenedPaths(cg, surfaces, delta)).toEqual([]);
+  });
+
+  it('a surface member ADDED in the same diff still resolves and its opening is detected', async () => {
+    // A brand-new file defines `boundary` (declared as the surface) AND a caller that
+    // reaches it. `boundary` is absent from the canonical cg, so resolution must use
+    // the post-change snapshot nodes — else the critical opening is silently missed.
+    write('src/newsurface.ts', 'export function boundary() { return 1; }\nexport function reachIt() { return boundary(); }\n');
+    const entries = await collectChangedFiles(repo, 'HEAD');
+    const delta = await computeEdgeDelta(repo, 'HEAD', entries, cg);
+    // Resolve the surface over canonical ∪ post-change nodes.
+    const { resolved } = resolveSurfaces(
+      [{ name: 'newbound', severity: 'critical', members: [{ symbol: 'boundary' }] }],
+      cg, delta.postNodes,
+    );
+    expect(resolved[0].ids.size).toBe(1); // resolved via postNodes
+    const opened = detectNewlyOpenedPaths(cg, resolved, delta, delta.postNodes);
+    expect(opened).toHaveLength(1);
+    expect(opened[0].openingEdge).toEqual({ from: 'reachIt', to: 'boundary' });
   });
 });

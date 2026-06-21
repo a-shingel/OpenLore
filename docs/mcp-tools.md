@@ -209,6 +209,7 @@ Registered only under `openlore mcp --preset federation`. Federation is an index
 | `federation_status` | Report the federation registry and each registered repo's live index state (`indexed` / `stale` / `unindexed` / `missing`), with registered-vs-live fingerprints. Read-only. | No |
 | `spec_store_status` | Report the health of a spec-store binding (`.openlore/config.json` `specStore`): per-target resolution + live index state, reference presence, and store-path presence. Declared target/reference **names** resolve against the federation registry. Read-only; never throws, never blocks. | No |
 | `working_set_context` | Assemble the working-set structural briefing for an active change in a spec-store binding: `orient`, generalized from one repo to the change's targets. Reads the change's proposal under the bound store, orients each resolved+indexed target on that intent, and returns ONE deterministic, token-budgeted, per-target-attributed briefing (symbol, callers, spec domains, insertion points) plus fresh in-scope anchored intent (orphaned withheld, drifted flagged). Read-only; never throws, never blocks. | Targets indexed |
+| `change_impact_certificate` | Certify what the current diff touches before it lands: ONE conclusion-shaped certificate combining blast radius, the paths the change NEWLY OPENS into each declared covering surface (reachable after but not before — computed differentially over the call graph, no LLM), the specs it drifts, and the tests to run. Anchored to the touched symbols via the freshness lease, so it decays. Advisory; opt-in blocking only on a configured surface severity. CLI: `openlore impact-certificate` (+ `--install-hook`). | Yes |
 
 When a registry exists, `analyze_impact`, `find_dead_code`, `select_tests`, and `find_path` accept opt-in `federation` (boolean) and `federationRepos` (name list) params: cross-repo consumers, live-via-federation exports, cross-repo test selection, and cross-repo producer/bridge location respectively. Each response names `reposConsulted` / `reposSkipped` — unindexed/stale repos are reported, never guessed.
 
@@ -229,6 +230,8 @@ A **spec-store binding** declares the code repositories an external spec reposit
 The report is `sound` when it carries no error-severity finding. Every finding includes a pasteable `remediation`. Exposed only under `openlore mcp --preset federation`.
 
 `working_set_context` builds on the binding: given `--change <id>`, it reads that change's proposal under the bound store, extracts a concise intent, and runs task-scoped `orient` against each resolved+indexed target. The merged briefing is ranked by structural relevance and bounded by a token budget (`tokenBudget`, default 8000); when truncated it carries an `omissionNote`. Every item is attributed to its target repository (`target`, `name`, `callers`, `specDomains`, `expand`). Fresh in-scope decisions appear under each target's `anchoredIntent` with `verdict: "current"`; drifted anchors appear as `verdict: "drifted"`; orphaned anchors are withheld entirely (orient never serves them as authoritative). Its `findings[]` carry stable codes (`no-binding`, `binding-unsound`, `change-unspecified`, `change-not-found`, `no-briefable-targets`, `target-not-briefable`, `orient-unavailable`); `ready` is true when the binding is sound and at least one target was briefed. Read-only, never blocks. Also exposed only under `openlore mcp --preset federation`.
+
+`change_impact_certificate` is the third tool of the spec-store arc. Where `blast_radius` answers "what does this diff touch?", the certificate answers the more dangerous question "what can this diff now *reach* that it could not before?" — the cross-boundary case file-ownership misses. You declare **covering surfaces** (semantic/governance boundaries, not directory globs) under `impactCertificate.surfaces`; for the current diff, OpenLore computes reachability to each surface in the pre-change and post-change call graph and reports the paths that exist only after — the paths the change *opened*, with the shortest opening path named. This is differential and needs no full rebuild: a new call edge can only come from a changed file, so only the changed files are re-parsed (base-ref vs working tree), and the canonical adjacency is adjusted both ways (`post = canonical + added − removed`, `pre = canonical − added + removed`). The certificate also folds in blast radius, drifted specs, and tests-to-run (reused from `blast_radius`), and is anchored to the touched symbols via the freshness lease so it decays — when an anchored symbol later moves, `spec_store_status` re-fires it as a `certificate-stale` finding. Advisory by default; a repository MAY opt into blocking specific surface severities (e.g. `impactCertificate.block: ["critical"]`), exactly as `blast_radius` made blocking opt-in. CLI: `openlore impact-certificate [--base <ref>] [--change <id>] [--json] [--hook] [--save]`. Exposed only under `openlore mcp --preset federation`.
 
 **Story Management**
 
@@ -276,6 +279,32 @@ ready        boolean   true when the binding is sound AND ≥1 target was briefe
 summary      string    conclusion-shaped headline
 ```
 Finding codes: `no-binding`, `binding-unsound`, `change-unspecified`, `change-not-found`, `no-briefable-targets`, `target-not-briefable`, `orient-unavailable`. Read-only; always succeeds (every problem is a finding), never blocks.
+
+**`change_impact_certificate`**
+```
+directory  string    Absolute path to the project directory (must have a built index)
+baseRef    string    Optional: git ref to diff the working tree against (default: HEAD)
+change     string    Optional: change id recorded on the certificate (default: "working-tree")
+persist    boolean   Optional: write the certificate under .openlore/impact-certificates/ so the
+                     spec-store health check can re-fire it when its lease decays
+```
+
+Response (`ImpactCertificate`) — the stable JSON shape an orchestrator can rely on:
+```
+change                 string   the change id (or "working-tree")
+baseRef, resolvedBaseRef  string   requested vs the ref git actually diffed against
+changed                { files, symbols }
+surfaces               [ { name, severity, resolvedSymbols, unresolvedMembers[] } ]
+newlyOpenedPaths       [ { surface, surfaceSeverity, openingEdge: { from, to }, path[], reaches } ]
+impact / tests / specs    reused verbatim from blast_radius (or { unavailable })
+lease                  { anchors[] }   the touched-symbol anchors that drive decay
+findings               [ { code, severity, subject, message, remediation, surfaceSeverity? } ]
+highestSurfaceSeverity "info" | "warn" | "critical" | "none"   the block signal
+posture                "advisory"
+caveats                string[]
+headline               string   conclusion-shaped one-liner
+```
+Finding codes: `surface-newly-reached`, `surface-critical`, `surface-unresolved-member`, `surface-empty`, `spec-drift`, `unresolved-added-call`, `no-surfaces-declared` (and `certificate-stale`, emitted by `spec_store_status` when a persisted certificate's anchored symbols have moved). Declare covering surfaces under `impactCertificate.surfaces` in `.openlore/config.json` (a surface is a set of `{ symbol }` / `{ file }` members with an optional `severity`); opt into blocking with `impactCertificate.block: ["critical"]`. Newly-opened-path detection is differential and bounded — only the changed files are re-parsed; renamed files read their base-ref content, untracked files are folded in, and an ambiguous added callee is reported (`unresolved-added-call`), never guessed. Read-only; always succeeds (every problem is a finding/caveat), advisory — never blocks. Exposed only under `openlore mcp --preset federation`.
 
 **`analyze_codebase`**
 ```

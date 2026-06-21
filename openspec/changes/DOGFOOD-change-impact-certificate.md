@@ -149,3 +149,45 @@ detected; and a corrupt/wrong-typed persisted certificate never throws. Full CI-
 > Method note: an early e2e cleanup used `git reset --hard`, which silently reverted the in-progress
 > source fixes while the already-built `dist/` kept passing — a reminder that CLI e2e runs the *built*
 > artifact, so source-level verification (typecheck + unit tests against source) must gate the commit.
+
+
+---
+
+## Round 3 - second adversarial pass (2026-06-21, PR #181 review)
+
+A fresh adversarial round (two reviewers + new real-input probes) found two more correctness bugs, a
+file-hygiene defect, and documentation/test gaps. All fixed.
+
+### BUG 4 - homonym phantom opening (HIGH) - FIXED
+
+Resolving an added call's callee by NAME against the canonical graph mis-bound a LOCAL helper that
+shares a covering-surface symbol's name to the canonical surface - a phantom newly-opened path that
+**falsely trips the critical block-gate**. Reproduced e2e: an untracked file defining its own local
+`validateSpecStoreConfig` and calling it reported `newlyOpenedPaths: 1` (critical). Fix: the per-file
+snapshot already binds the call to the local definition, so we key changed-file calls by their resolved
+snapshot-internal id (`id:<calleeId>`) and only name-resolve callees that are external to the snapshot
+(cross-file calls). After: `newlyOpenedPaths: 0`. (Decision `97c22605`.)
+
+### BUG 5 - a surface member ADDED in the same diff was missed (MEDIUM) - FIXED
+
+`resolveSurfaces` ran over the canonical graph only, so a surface symbol created in the same diff was
+unresolvable, so its critical opening was reported as `none` (downgraded to a `warn` unresolved-member
+finding). Fix: resolve surfaces over canonical + post-change snapshot nodes; the certificate now computes
+the edge delta before resolving surfaces so those nodes are available.
+
+### BUG 6 - three NUL bytes embedded in the source (LOW) - FIXED
+
+The handler carried three raw NUL bytes (accidental key separators), so `file(1)` read it as binary and
+plain `grep` silently skipped it. Replaced with the `` escape sequence (identical runtime, valid UTF-8).
+
+### Documentation + test coverage closed
+
+- Docs: `change_impact_certificate` / `openlore impact-certificate` now has a full entry in
+  `docs/mcp-tools.md` (table row + prose + parameters + finding codes), `docs/cli-reference.md` (command
+  table row + reference subsection), `README.md` (situational tool table), and `docs/federation.md`
+  (spec-store-arc completion). It previously appeared only in `CLAUDE.md`.
+- Tests: added a CLI test file `src/cli/commands/impact-certificate.test.ts` (hook install/uninstall
+  idempotency + coexistence + round-trip, and `runImpactCertificateCli` advisory/blocking exit codes incl.
+  malformed/throwing config), a `dispatchTool(change_impact_certificate)` MCP-path reachability test, and
+  regression tests for the homonym and same-diff-surface bugs against a real temp git repo.
+  Suite: **4,399 passed / 2 skipped**.
