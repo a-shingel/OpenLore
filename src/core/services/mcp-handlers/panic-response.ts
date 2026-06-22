@@ -285,6 +285,35 @@ export function recordHookInterventionLocked(
   );
 }
 
+/**
+ * Locked read-modify-write for panic-state.json: under the cross-process lock, read the
+ * FRESHEST on-disk state, apply `mutate(fresh)`, persist with a bumped revision, and return
+ * the written state. This is the serialization primitive the MCP writer uses so it cannot
+ * clobber a concurrent panic-check hook (`recordHookInterventionLocked`) or gryph daemon
+ * (`casWritePanicState`) write — in particular the cross-process `interventionCountSinceStable`
+ * counter stays monotonic (the MCP path previously read-then-wrote via an unlocked
+ * `writePanicState`, racing the hook's locked increment).
+ *
+ * Because the read and write happen under the same lock, no separate CAS retry is needed —
+ * the lock guarantees no other writer interleaves. Fails open: if the lock cannot be acquired
+ * the mutation is applied to a fresh read and written best-effort (unlocked), degrading to the
+ * prior behavior rather than blocking the hot path. Never throws.
+ */
+export function mutatePanicStateLocked(
+  directory: string,
+  mutate: (fresh: PanicState) => PanicState,
+): PanicState {
+  const apply = (): PanicState => {
+    const fresh = readPanicState(directory);
+    // Seed revision from the freshest disk read so writePanicState bumps to fresh+1
+    // (monotonic across all writers; under the lock there is no concurrent writer).
+    const next: PanicState = { ...mutate(fresh), revision: fresh.revision };
+    const revision = writePanicState(directory, next);
+    return { ...next, revision };
+  };
+  return withPanicStateLock<PanicState | null>(directory, apply, null) ?? apply();
+}
+
 // ============================================================================
 // PANIC CHECK OUTPUT (hook response builder)
 // ============================================================================
