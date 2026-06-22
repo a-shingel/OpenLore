@@ -27,7 +27,7 @@ import {
 import {
   gitignoreExists,
   isInGitignore,
-  addToGitignore,
+  ensureGitignored,
 } from '../../core/services/gitignore-manager.js';
 import {
   OPENLORE_DIR,
@@ -212,11 +212,11 @@ After initialization, run 'openlore analyze' to scan your codebase.
       }
 
       if (shouldAdd) {
-        await addToGitignore(rootPath, `${OPENLORE_DIR}/`, 'openlore analysis artifacts');
+        const result = await ensureGitignored(rootPath, `${OPENLORE_DIR}/`, 'openlore analysis artifacts');
         logger.success(
-          hasGitignore
-            ? `Added ${OPENLORE_DIR}/ to .gitignore`
-            : `Created .gitignore with ${OPENLORE_DIR}/`
+          result === 'created'
+            ? `Created .gitignore with ${OPENLORE_DIR}/`
+            : `Added ${OPENLORE_DIR}/ to .gitignore`
         );
       } else {
         logger.warning(`${OPENLORE_DIR}/ not added to .gitignore`);
