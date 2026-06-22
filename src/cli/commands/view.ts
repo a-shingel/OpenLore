@@ -596,7 +596,18 @@ export const viewCommand = new Command('view')
         },
       });
 
-      await server.listen();
+      try {
+        await server.listen();
+      } catch (err) {
+        const msg = (err as Error).message;
+        if (/EADDRINUSE|address already in use/i.test(msg)) {
+          logger.error(`Port ${port} is already in use. Start the viewer on another port: openlore view --port <n>`);
+        } else {
+          logger.error(`Failed to start the viewer: ${msg}`);
+        }
+        process.exitCode = 1;
+        return;
+      }
 
       const url = `http://${host}:${port}/`;
       logger.success(`Viewer running at ${url}`);
