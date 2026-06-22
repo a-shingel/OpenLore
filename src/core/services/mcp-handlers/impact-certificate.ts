@@ -43,6 +43,7 @@ import type { SerializedCallGraph, FunctionNode, CallEdge } from '../../analyzer
 import type {
   StructuralAnchor,
   CoveringSurfaceConfig,
+  CoveringSurfaceMember,
   CoveringSurfaceSeverity,
   ImpactCertificateConfig,
 } from '../../../types/index.js';
@@ -620,7 +621,13 @@ export function surfacesFromConfig(cfg: ImpactCertificateConfig | undefined): Co
     seen.add(name);
     const severity: CoveringSurfaceSeverity = VALID_SEVERITIES.has(s.severity as CoveringSurfaceSeverity)
       ? (s.severity as CoveringSurfaceSeverity) : 'warn';
-    out.push({ name, members: s.members, severity });
+    // Members arrive via raw JSON.parse: a non-object entry (null, a bare string, a
+    // number) would make `resolveSurfaces`' `m.symbol`/`m.file` access throw out of
+    // the no-throw handler. Keep only object members.
+    const members = s.members.filter(
+      (m): m is CoveringSurfaceMember => !!m && typeof m === 'object',
+    );
+    out.push({ name, members, severity });
   }
   return out;
 }
