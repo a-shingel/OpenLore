@@ -143,6 +143,36 @@ describe('readPanicState', () => {
     expect(read.panicLevel).toBe(2);
     expect(read.triggers).toEqual(['oscillation']);
   });
+
+  it('treats an unparseable updatedAt as expired (NaN age must not preserve zombie state)', async () => {
+    // new Date("oops").getTime() is NaN, so the old `age > EXPIRY` check was false
+    // and a corrupt file survived forever. It must now reset to default.
+    const bad = JSON.stringify({ schemaVersion: 1, panicScore: 90, panicLevel: 4, updatedAt: 'oops' });
+    await writeFile(join(dir, OPENLORE_DIR, 'panic-state.json'), bad, 'utf-8');
+    const state = readPanicState(dir);
+    expect(state.panicLevel).toBe(0);
+    expect(state.panicScore).toBe(0);
+  });
+
+  it('sanitizes garbage numeric fields rather than passing them into scoring', async () => {
+    const now = new Date().toISOString();
+    const garbage = JSON.stringify({
+      schemaVersion: 1,
+      updatedAt: now,
+      panicScore: 'abc',          // non-number → default 0
+      panicLevel: 99,             // out of range → clamped to 4
+      localityConfidence: 5,      // > 1 → clamped to 1
+      interventionCountSinceStable: -3, // negative → clamped to 0
+      triggers: ['ok', 42, null], // non-strings dropped
+    });
+    await writeFile(join(dir, OPENLORE_DIR, 'panic-state.json'), garbage, 'utf-8');
+    const state = readPanicState(dir);
+    expect(state.panicScore).toBe(0);
+    expect(state.panicLevel).toBe(4);
+    expect(state.localityConfidence).toBe(1);
+    expect(state.interventionCountSinceStable).toBe(0);
+    expect(state.triggers).toEqual(['ok']);
+  });
 });
 
 // ============================================================================

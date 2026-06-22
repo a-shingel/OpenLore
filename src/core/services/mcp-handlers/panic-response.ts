@@ -18,6 +18,7 @@ import {
   HOOK_COOLDOWN_MS,
   SEVERITY_MAP,
   PANIC_SESSION_EXPIRY_MS,
+  PANIC_SCORE_MAX,
 } from './panic-constants.js';
 
 // ============================================================================
@@ -106,9 +107,20 @@ export function defaultPanicState(): PanicState {
   };
 }
 
+/** Clamp an untrusted JSON value to a finite number in [min, max], or fall back. */
+function clampNum(v: unknown, min: number, max: number, fallback: number): number {
+  return typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : fallback;
+}
+
 /**
  * Reads panic state. Fails open on all error paths:
- * missing file, parse error, wrong schema version, expired session.
+ * missing file, parse error, wrong schema version, expired/invalid session.
+ *
+ * panic-state.json is a hand-editable on-disk file, so every field is treated as
+ * untrusted: numeric fields are coerced and clamped so a garbage value (NaN, a
+ * string, an out-of-range level) can't poison scoring or index off the end of
+ * SEVERITY_MAP/DIRECTIVE_MESSAGES, and a non-parseable `updatedAt` (NaN age) is
+ * treated as expired rather than letting a zombie state survive forever.
  */
 export function readPanicState(directory: string): PanicState {
   try {
@@ -120,13 +132,24 @@ export function readPanicState(directory: string): PanicState {
 
     if (parsed.schemaVersion !== 1) return defaultPanicState();
 
-    // Session hard reset: zombie state from a previous session must not leak
-    if (parsed.updatedAt) {
-      const age = Date.now() - new Date(parsed.updatedAt).getTime();
-      if (age > PANIC_SESSION_EXPIRY_MS) return defaultPanicState();
-    }
+    // Session hard reset: zombie state from a previous session must not leak. A
+    // missing OR unparseable updatedAt (age === NaN) is treated as expired.
+    const age = Date.now() - new Date(parsed.updatedAt ?? 0).getTime();
+    if (!Number.isFinite(age) || age > PANIC_SESSION_EXPIRY_MS) return defaultPanicState();
 
-    return { ...defaultPanicState(), ...parsed, schemaVersion: 1, revision: parsed.revision ?? 0 };
+    const base = defaultPanicState();
+    return {
+      ...base,
+      ...parsed,
+      schemaVersion: 1,
+      panicScore: clampNum(parsed.panicScore, 0, PANIC_SCORE_MAX, base.panicScore),
+      panicLevel: clampNum(Math.trunc(Number(parsed.panicLevel)), 0, 4, base.panicLevel) as PanicLevel,
+      recentOrientCount: clampNum(Math.trunc(Number(parsed.recentOrientCount)), 0, Number.MAX_SAFE_INTEGER, base.recentOrientCount),
+      localityConfidence: clampNum(parsed.localityConfidence, 0, 1, base.localityConfidence),
+      interventionCountSinceStable: clampNum(Math.trunc(Number(parsed.interventionCountSinceStable)), 0, Number.MAX_SAFE_INTEGER, base.interventionCountSinceStable),
+      triggers: Array.isArray(parsed.triggers) ? parsed.triggers.filter((t): t is string => typeof t === 'string') : base.triggers,
+      revision: clampNum(Math.trunc(Number(parsed.revision)), 0, Number.MAX_SAFE_INTEGER, 0),
+    };
   } catch {
     return defaultPanicState();
   }
