@@ -12,15 +12,23 @@ import { fingerprint } from '../block.js';
 import { mergeEntries, readMeta, removeManaged, isHandEdited } from '../json-managed.js';
 import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
+import { LEAN_DEFAULT_PRESET } from '../../../constants.js';
 
 const RULES_FILE = '.cursorrules';
 const MDC_FILE = '.cursor/rules/openlore.mdc';
 const MCP_FILE = '.cursor/mcp.json';
 
+/**
+ * MCP server registration. Wires `openlore mcp --preset <name>`: the caller's
+ * preset when given, else the lean default surface (the benchmark-winning
+ * navigation core). The preset is always emitted explicitly so the wired surface
+ * is visible in the config and never relies on the bare-command default
+ * (change: default-to-lean-tool-surface).
+ */
 function mcpEntry(preset?: string): { command: string; args: string[] } {
   return {
     command: 'npx',
-    args: ['--yes', 'openlore', 'mcp', ...(preset ? ['--preset', preset] : [])],
+    args: ['--yes', 'openlore', 'mcp', '--preset', preset ?? LEAN_DEFAULT_PRESET],
   };
 }
 

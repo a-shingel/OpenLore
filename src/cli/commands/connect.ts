@@ -64,7 +64,7 @@ export const connectCommand = new Command('connect')
     'and SessionStart hook, and set the run permission. Omit the agent for an interactive picker.'
   )
   .argument('[agent]', 'Agent to connect (claude-code, cursor, cline, continue, agents-md)')
-  .option('--preset <name>', 'Wire the MCP server to a tool preset (minimal, navigation, memory) instead of the full surface')
+  .option('--preset <name>', 'Wire the MCP server to a tool preset (minimal, navigation, memory, verify, federation, or full). Default (no preset) wires the lean navigation surface; pass "full" to wire all 62 tools (the prior default).')
   .option('--dry-run', 'Print the planned changes without writing any files', false)
   .option('--force', 'Overwrite OpenLore-managed blocks even if hand-edited', false)
   .option('--no-analyze', 'Configure surfaces only; do not build the index')
