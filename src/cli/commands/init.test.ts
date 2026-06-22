@@ -241,12 +241,25 @@ describe('init command', () => {
       expect(gitignoreManager.addToGitignore).not.toHaveBeenCalled();
     });
 
-    it('should skip gitignore update when no .gitignore file exists', async () => {
+    it('should create .gitignore with .openlore/ when no .gitignore file exists', async () => {
       const gitignoreManager = await import('../../core/services/gitignore-manager.js');
       vi.mocked(gitignoreManager.gitignoreExists).mockResolvedValue(false);
+      vi.mocked(gitignoreManager.isInGitignore).mockResolvedValue(false);
 
-      await initCommand.parseAsync(['node', 'init'], { from: 'user' });
-      expect(gitignoreManager.addToGitignore).not.toHaveBeenCalled();
+      // Non-TTY: auto-add (no interactive prompt)
+      const originalIsTTY = process.stdin.isTTY;
+      Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+
+      try {
+        await initCommand.parseAsync(['node', 'init'], { from: 'user' });
+        expect(gitignoreManager.addToGitignore).toHaveBeenCalledWith(
+          expect.any(String),
+          '.openlore/',
+          expect.any(String)
+        );
+      } finally {
+        Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
+      }
     });
   });
 

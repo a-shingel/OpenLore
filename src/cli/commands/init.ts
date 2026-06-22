@@ -197,8 +197,11 @@ After initialization, run 'openlore analyze' to scan your codebase.
 
     if (alreadyIgnored) {
       logger.debug(`${OPENLORE_DIR}/ already in .gitignore`);
-    } else if (hasGitignore) {
-      // Check if running in TTY for interactive prompt
+    } else {
+      // Whether or not a .gitignore already exists, ensure .openlore/ is ignored.
+      // A fresh `git init` repo has no .gitignore yet; addToGitignore creates one.
+      // Without this, analysis artifacts (multi-MB lance binaries) leak into git
+      // status and pollute diff-based tools (impact-certificate, blast-radius).
       let shouldAdd = true;
 
       if (process.stdin.isTTY) {
@@ -210,14 +213,15 @@ After initialization, run 'openlore analyze' to scan your codebase.
 
       if (shouldAdd) {
         await addToGitignore(rootPath, `${OPENLORE_DIR}/`, 'openlore analysis artifacts');
-        logger.success(`Added ${OPENLORE_DIR}/ to .gitignore`);
+        logger.success(
+          hasGitignore
+            ? `Added ${OPENLORE_DIR}/ to .gitignore`
+            : `Created .gitignore with ${OPENLORE_DIR}/`
+        );
       } else {
         logger.warning(`${OPENLORE_DIR}/ not added to .gitignore`);
         logger.debug('Analysis artifacts may be committed to version control');
       }
-    } else {
-      logger.debug('No .gitignore file found');
-      logger.debug(`Consider creating one to exclude ${OPENLORE_DIR}/`);
     }
 
     // Step 6: Output summary

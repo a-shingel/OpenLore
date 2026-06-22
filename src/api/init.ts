@@ -92,15 +92,15 @@ export async function openloreInit(options: InitApiOptions = {}): Promise<InitRe
     progress(onProgress, 'OpenSpec directory exists', 'skip');
   }
 
-  // Update .gitignore
+  // Update .gitignore — create it when absent so a fresh `git init` repo still
+  // ignores .openlore/ analysis artifacts (multi-MB lance binaries) instead of
+  // leaking them into git status and diff-based tools.
   const hasGitignore = await gitignoreExists(rootPath);
-  if (hasGitignore) {
-    const alreadyIgnored = await isInGitignore(rootPath, `${OPENLORE_DIR}/`);
-    if (!alreadyIgnored) {
-      progress(onProgress, 'Updating .gitignore', 'start');
-      await addToGitignore(rootPath, `${OPENLORE_DIR}/`, 'openlore analysis artifacts');
-      progress(onProgress, 'Updating .gitignore', 'complete');
-    }
+  const alreadyIgnored = hasGitignore && (await isInGitignore(rootPath, `${OPENLORE_DIR}/`));
+  if (!alreadyIgnored) {
+    progress(onProgress, 'Updating .gitignore', 'start');
+    await addToGitignore(rootPath, `${OPENLORE_DIR}/`, 'openlore analysis artifacts');
+    progress(onProgress, 'Updating .gitignore', 'complete');
   }
 
   return {

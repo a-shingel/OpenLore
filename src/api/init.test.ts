@@ -112,12 +112,13 @@ describe('openloreInit', () => {
       expect(mockAddToGitignore).not.toHaveBeenCalled();
     });
 
-    it('skips addToGitignore when no .gitignore file', async () => {
+    it('creates .gitignore with .openlore/ when no .gitignore file exists', async () => {
       mockGitignoreExists.mockResolvedValue(false);
+      mockIsInGitignore.mockResolvedValue(false);
 
       await openloreInit({ rootPath: ROOT });
 
-      expect(mockAddToGitignore).not.toHaveBeenCalled();
+      expect(mockAddToGitignore).toHaveBeenCalledWith(ROOT, '.openlore/', expect.any(String));
     });
 
     it('skips createOpenSpecStructure when openspec dir already exists', async () => {
