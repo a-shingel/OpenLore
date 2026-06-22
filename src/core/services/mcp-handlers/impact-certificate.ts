@@ -28,7 +28,7 @@
  */
 
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { validateDirectory, readCachedContext, safeJoin } from './utils.js';
