@@ -727,7 +727,12 @@ export function recheckPersistedCertificates(absDir: string): StaleCertificate[]
  * honest `changed.symbols`; file anchors are not symbols.
  */
 function buildLeaseAnchors(absDir: string, changedFiles: readonly string[]): { anchors: StructuralAnchor[]; symbolCount: number } {
-  const anchorCtx = AnchorContext.open(absDir);
+  // Fully defensive: this is called from computeImpactCertificate without a try/catch
+  // at the call site or the handler, so a throw (AnchorContext.open or a corrupt/locked
+  // EdgeStore mid-read) would escape the no-throw handler. Degrade to no anchors instead
+  // — parity with recheckCertificate's anchor path.
+  let anchorCtx: ReturnType<typeof AnchorContext.open>;
+  try { anchorCtx = AnchorContext.open(absDir); } catch { return { anchors: [], symbolCount: 0 }; }
   if (!anchorCtx) return { anchors: [], symbolCount: 0 };
   try {
     const nodes = anchorCtx.anchorNodesForFiles(changedFiles);
@@ -746,8 +751,10 @@ function buildLeaseAnchors(absDir: string, changedFiles: readonly string[]): { a
       anchors.push({ filePath: file, contentHash: hash });
     }
     return { anchors, symbolCount: nodes.length };
+  } catch {
+    return { anchors: [], symbolCount: 0 };
   } finally {
-    anchorCtx.close();
+    try { anchorCtx.close(); } catch { /* ignore */ }
   }
 }
 
