@@ -543,7 +543,7 @@ OpenSpec discovers OpenLore by a declarative **plugin manifest** (the `"openspec
 
 ```bash
 openlore plugin-manifest emit --json   # print the manifest (stdout only)
-openlore plugin-manifest validate      # schema + semantic check, exit 0/1
+openlore plugin-manifest validate      # schema + semantic check; exit 0 valid / 1 invalid / 2 not found
 ```
 
 > **Two manifests, never confused.** `openlore plugin-manifest` is the OpenSpec *plugin* contract (the marketplace reads it). `openlore manifest` (above) is the unrelated *federation* manifest (`.well-known/openlore.json`). Distinct names, distinct schemas.

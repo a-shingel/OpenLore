@@ -4,11 +4,11 @@
  *   2. the floor stays coherent with package.json `engines.node` — so the guard's
  *      message can never promise a different minimum than the package declares.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { checkNodeVersion, MIN_NODE, EXIT_UNSUPPORTED_NODE } from './node-version-guard.js';
+import { checkNodeVersion, assertSupportedNode, MIN_NODE, EXIT_UNSUPPORTED_NODE } from './node-version-guard.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -49,6 +49,34 @@ describe('Node floor coherence', () => {
     expect(match, `engines.node "${engines}" must declare a major.minor floor`).toBeTruthy();
     expect(Number(match![1])).toBe(MIN_NODE.major);
     expect(Number(match![2])).toBe(MIN_NODE.minor);
+  });
+});
+
+describe('assertSupportedNode side effect', () => {
+  it('on an unsupported Node, writes a legible stderr line and exits 78', () => {
+    const orig = process.versions.node;
+    Object.defineProperty(process.versions, 'node', { value: '20.0.0', configurable: true });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      assertSupportedNode();
+      expect(exitSpy).toHaveBeenCalledWith(EXIT_UNSUPPORTED_NODE);
+      const msg = errSpy.mock.calls.map((c) => String(c[0])).join('');
+      expect(msg).toContain(`>=${MIN_NODE.major}.${MIN_NODE.minor}`);
+      expect(msg).toContain('20.0.0');
+    } finally {
+      Object.defineProperty(process.versions, 'node', { value: orig, configurable: true });
+      exitSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
+
+  it('on a supported Node, does not exit', () => {
+    // The test runner itself is on a supported Node (CI floor), so this is a no-op.
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    assertSupportedNode();
+    expect(exitSpy).not.toHaveBeenCalled();
+    exitSpy.mockRestore();
   });
 });
 

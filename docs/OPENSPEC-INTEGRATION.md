@@ -461,7 +461,7 @@ distribution:
 
 ```bash
 openlore plugin-manifest emit --json   # print the manifest (stdout only)
-openlore plugin-manifest validate      # schema + semantic check, exit 0/1
+openlore plugin-manifest validate      # schema + semantic check; exit 0 valid / 1 invalid / 2 not found
 ```
 
 The manifest declares: `manifestVersion`, `id`, `namespace` (`lore`), `bin` (`openlore`, with an
