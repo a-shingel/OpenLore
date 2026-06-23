@@ -84,6 +84,8 @@ Deep-trace detail — the win scales with codebase size (cost Δ; round-trips WI
 
 > **Honesty contract.** We never publish a savings number the benchmark didn't produce; we always show the loss cases next to the wins; the scorecard is date-stamped and re-measured after each optimization phase. Every public token claim traces to a command you can run in this repo — if it doesn't reproduce, treat it as marketing and call it out.
 
+> **Prove it on your repo — no API key needed.** `openlore prove --estimate` projects the orientation tax from your own call graph in seconds (zero API key, zero network); plain `openlore prove` runs the full measured WITH/WITHOUT pass (needs `claude` + a key). Add `--json` (CI-consumable), `--markdown` (a paste-ready scorecard block + a shields.io badge for your README), or `--save` (a dated record under `.openlore/prove/`). Honest by construction — an estimate is labeled `estimate` everywhere and never presented as a measurement. Details: [docs/AGENT-BENCHMARKS.md](docs/AGENT-BENCHMARKS.md#openlore-prove--measure-or-estimate-it-on-your-repo).
+
 ---
 
 ## Why It Exists
@@ -163,6 +165,7 @@ That single command:
 1. **Auto-detects** which agent surfaces are present (Claude Code, Cursor, Cline, Continue, AGENTS.md) and wires each one to call `orient()` — no manual `CLAUDE.md` editing.
 2. **Registers the MCP server** so it starts automatically when your agent launches (you don't run `openlore mcp` yourself).
 3. **Builds the index** (`init` + `analyze` → a keyword/BM25 graph, no network needed) so `orient()` returns real results in your very first session — no separate `analyze` step.
+4. **Wires task-scoped orientation** (Claude Code): a `UserPromptSubmit` hook runs `orient` against each new prompt and injects a bounded, ignorable orientation block *before* the first turn — so the common task begins already oriented without a manual `orient()` call or a spent tool round-trip. A deterministic relevance gate keeps it out of the small/familiar case (degrading to a one-line pointer); disable with `contextInjection.mode: "off"` in `.openlore/config.json`. See [docs/install.md](docs/install.md#task-scoped-context-injection).
 
 ```bash
 openlore install --no-analyze   # wire surfaces only; build the index later
@@ -624,7 +627,7 @@ Because OpenLore requires Node ≥22.5 while OpenSpec runs on ≥20.19, a delega
 ```bash
 npm install
 npm run build
-npm test          # 2900+ unit tests
+npm test          # 4400+ unit tests
 npm run typecheck
 ```
 

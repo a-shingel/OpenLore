@@ -15,6 +15,17 @@ All notable changes to OpenLore are documented here. This project adheres to
   New `openlore plugin-manifest emit|validate` inspects/validates it — named
   distinctly from the federation `openlore manifest` so the two never collide. The
   host loader and curated registry are built separately in the OpenSpec repo.
+- **Task-scoped context injection** — `openlore install` now wires a Claude Code
+  `UserPromptSubmit` hook running `openlore orient --inject`, which orients on your
+  submitted prompt and injects a bounded, deterministic, ignorable orientation
+  block *before the agent's first turn* — amortizing the per-task `orient`
+  round-trip the Value Scorecard attributes the small/familiar loss case to. A
+  deterministic relevance gate keeps it out of weak/shallow tasks (degrading to a
+  one-line pointer); it is fail-open (never breaks a turn) and reuses the lean
+  `orient` output (no new MCP tool). Disable or tune via the `contextInjection`
+  block in `.openlore/config.json` (`mode: "off"`, `tokenBudget`, gate thresholds).
+  Adapters without a pre-turn hook (Cursor/Cline/Continue/AGENTS.md) fall back to
+  the instruction block (#184).
 
 ### Changed
 
